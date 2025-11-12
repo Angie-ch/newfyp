@@ -1,0 +1,62 @@
+
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Typhoon Prediction Report</title>
+            <style>
+                body { font-family: Arial, sans-serif; margin: 40px; background-color: #f5f5f5; }
+                h1 { color: #2c3e50; border-bottom: 3px solid #3498db; padding-bottom: 10px; }
+                h2 { color: #34495e; margin-top: 30px; }
+                .metric { background-color: white; padding: 20px; margin: 20px 0; 
+                          border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+                .metric-value { font-size: 32px; font-weight: bold; color: #3498db; }
+                .metric-label { font-size: 14px; color: #7f8c8d; }
+                .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); 
+                        gap: 20px; }
+                img { max-width: 100%; height: auto; border-radius: 8px; 
+                      box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+                table { width: 100%; border-collapse: collapse; background-color: white;
+                        margin: 20px 0; }
+                th, td { padding: 12px; text-align: left; border-bottom: 1px solid #ddd; }
+                th { background-color: #3498db; color: white; }
+                tr:hover { background-color: #f5f5f5; }
+            </style>
+        </head>
+        <body>
+            <h1>🌀 Typhoon Prediction Report</h1>
+            <p><strong>Generated:</strong> 2025-11-06</p>
+            
+            <h2>📊 Summary Metrics</h2>
+            <div class="grid">
+                <div class="metric">
+                    <div class="metric-label">Mean Track Error</div>
+                    <div class="metric-value">56.6 km</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Mean Intensity RMSE</div>
+                    <div class="metric-value">1.70 m/s</div>
+                </div>
+                <div class="metric">
+                    <div class="metric-label">Samples Evaluated</div>
+                    <div class="metric-value">5</div>
+                </div>
+            </div>
+            
+            <h2>📈 Training Progress</h2>
+            <img src="training_curves.png" alt="Training Curves">
+            
+            <h2>🗺️ Trajectory Predictions</h2>
+            <img src="trajectory_comparison.png" alt="Trajectory Comparison">
+            
+            <h2>💨 Intensity Predictions</h2>
+            <img src="intensity_comparison.png" alt="Intensity Comparison">
+            
+            <h2>🛰️ Satellite Imagery</h2>
+            <img src="frames_comparison.png" alt="Frames Comparison">
+            
+            <h2>📉 Error Analysis</h2>
+            <img src="error_statistics.png" alt="Error Statistics">
+            
+        </body>
+        </html>
+        

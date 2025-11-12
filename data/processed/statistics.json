@@ -1,0 +1,25 @@
+{
+  "mean": NaN,
+  "std": NaN,
+  "min": NaN,
+  "max": NaN,
+  "n_samples": 100,
+  "shape": {
+    "past_frames": [
+      12,
+      48,
+      64,
+      64
+    ],
+    "future_frames": [
+      8,
+      48,
+      64,
+      64
+    ]
+  },
+  "data_source": "IBTrACS_WP",
+  "meteorological_data": "ERA5",
+  "year_range": "2021-2024",
+  "generation_date": "2025-11-06T16:52:39.488201"
+}

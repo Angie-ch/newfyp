@@ -1,0 +1,69 @@
+# Diffusion Model Configuration
+
+model:
+  latent_channels: 8
+  hidden_dim: 256
+  num_heads: 8
+  depth: 4
+  use_spiral_attention: true
+  use_multiscale_temporal: true
+  
+  # Multi-task heads
+  track_head:
+    hidden_dim: 256
+    num_layers: 3
+    dropout: 0.1
+  
+  intensity_head:
+    hidden_dim: 256
+    num_layers: 3
+    dropout: 0.1
+
+diffusion:
+  timesteps: 1000
+  beta_schedule: "linear"
+  beta_start: 1.0e-4
+  beta_end: 0.02
+  sampling_steps: 50  # DDIM steps
+  
+data:
+  data_dir: "data/processed_temporal_split"
+  autoencoder_path: "checkpoints/autoencoder/best.pth"
+  batch_size: 4  # Reduced due to smaller dataset
+  num_workers: 0  # Set to 0 for macOS compatibility
+  input_frames: 8
+  output_frames: 12
+  
+training:
+  epochs: 100
+  learning_rate: 2.0e-4
+  weight_decay: 0.01
+  lr_scheduler: "cosine"
+  warmup_epochs: 10
+  gradient_clip: 1.0
+  ema_decay: 0.9999
+  
+  # Loss weights
+  loss_weights:
+    diffusion: 1.0
+    track: 0.5
+    intensity: 0.3
+    physics: 0.2
+    consistency: 0.1
+  
+  # Physics loss weights
+  physics_weights:
+    geostrophic: 1.0
+    mass_conservation: 0.1
+    temporal_smooth: 0.1
+    wind_pressure: 0.5
+    
+logging:
+  log_dir: "logs/diffusion"
+  save_dir: "checkpoints/diffusion"
+  log_interval: 50
+  save_interval: 5
+  use_wandb: true
+  project_name: "typhoon-diffusion"
+  visualize_interval: 500
+
