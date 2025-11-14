@@ -62,11 +62,19 @@ class JointAutoencoderTrainer:
             weight_decay=config.get('weight_decay', 0.01)
         )
         
-        # Scheduler
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        # Scheduler - Use ReduceLROnPlateau for better convergence
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
-            T_max=config.get('epochs', 50)
+            mode='min',
+            factor=0.5,
+            patience=3,
+            verbose=True,
+            min_lr=1e-6
         )
+        
+        # Early stopping
+        self.patience = config.get('early_stopping_patience', 5)
+        self.patience_counter = 0
         
         # Logging
         self.log_dir = Path(config.get('log_dir', 'logs/joint_autoencoder'))
@@ -101,8 +109,8 @@ class JointAutoencoderTrainer:
             # Validate
             val_loss_dict = self.validate(epoch)
             
-            # Step scheduler
-            self.scheduler.step()
+            # Step scheduler based on validation loss
+            self.scheduler.step(val_loss_dict['total'])
             
             # Log
             logger.info(f"Train Loss: {train_loss_dict['total']:.6f} "
@@ -124,11 +132,21 @@ class JointAutoencoderTrainer:
             if (epoch + 1) % self.config.get('save_interval', 5) == 0:
                 self.save_checkpoint(epoch, val_loss_dict['total'])
             
-            # Save best model
+            # Save best model and check early stopping
             if val_loss_dict['total'] < self.best_val_loss:
                 self.best_val_loss = val_loss_dict['total']
+                self.patience_counter = 0  # Reset patience counter
                 self.save_checkpoint(epoch, val_loss_dict['total'], is_best=True)
                 logger.info(f"New best model saved with val loss: {val_loss_dict['total']:.6f}")
+            else:
+                self.patience_counter += 1
+                logger.info(f"No improvement. Patience: {self.patience_counter}/{self.patience}")
+                
+                # Early stopping
+                if self.patience_counter >= self.patience:
+                    logger.info(f"Early stopping triggered at epoch {epoch + 1}")
+                    logger.info(f"Best validation loss: {self.best_val_loss:.6f}")
+                    break
         
         logger.info("Training complete!")
         self.writer.close()

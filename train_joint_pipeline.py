@@ -1,4 +1,4 @@
-   python evaluate.py --autoencoder checkpoints/joint_autoencoder/best.pth --diffusion checkpoints/joint_diffusion/best.pth
+"""
 Complete Training Pipeline for Joint ERA5 + IBTrACS Model
 
 This script trains the complete pipeline:
@@ -160,8 +160,8 @@ def train_autoencoder(config: dict, device: str):
     """
     Train joint autoencoder
     
-    Encodes ERA5 + IBTrACS together → Unified Latent
-    Decodes Unified Latent → ERA5 + IBTrACS separately
+    Encodes ERA5 + IBTrACS together -> Unified Latent
+    Decodes Unified Latent -> ERA5 + IBTrACS separately
     """
     logger.info("="*80)
     logger.info("STAGE 1: Training Joint Autoencoder")
