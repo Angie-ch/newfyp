@@ -2,7 +2,7 @@
 # Operates on unified latent space containing ERA5 + IBTrACS
 
 data:
-  data_dir: "data/processed_temporal_split"
+  data_dir: "/Volumes/data/fyp2/data/data/processed_temporal_split"
   past_frames: 8
   future_frames: 12
   era5_channels: 48

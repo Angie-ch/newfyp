@@ -89,3 +89,21 @@ models/*.pt
 outputs/
 wandb/
 
+
+# macOS 隐藏文件
+._*
+.DS_Store
+
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 大文件
+*.tar.gz
+*.pth
+*.pt
+checkpoints/
+logs/
+data/processed_temporal_split/

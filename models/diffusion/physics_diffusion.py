@@ -130,7 +130,7 @@ class PhysicsInformedDiffusionModel(nn.Module):
         
         return predictions
     
-    def predict_x0(self, z_t, noise_pred, t, alpha_bar=None):
+    def predict_x0(self, z_t, noise_pred, t, alpha_bar=None, schedule=None):
         """
         Predict clean sample x0 from noisy sample and predicted noise
         
@@ -139,10 +139,21 @@ class PhysicsInformedDiffusionModel(nn.Module):
             noise_pred: (B, T, C, H, W) predicted noise
             t: (B,) timestep
             alpha_bar: Optional precomputed alpha_bar values
+            schedule: Optional schedule object (for EDM support)
         
         Returns:
             x0_pred: (B, T, C, H, W) predicted clean sample
         """
+        # Check if using EDM schedule
+        if schedule is not None and hasattr(schedule, 'get_sigma'):
+            # EDM formulation: x_0 = x_t - sigma_t * noise
+            sigma_t = schedule.get_sigma(t)  # (B,)
+            while len(sigma_t.shape) < len(z_t.shape):
+                sigma_t = sigma_t.unsqueeze(-1)
+            x0_pred = z_t - sigma_t * noise_pred
+            return x0_pred
+        
+        # Standard DDPM formulation
         if alpha_bar is None:
             # Compute alpha_bar (assume linear schedule)
             beta = torch.linspace(1e-4, 0.02, 1000, device=z_t.device, dtype=torch.float32)

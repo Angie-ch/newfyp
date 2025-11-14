@@ -62,11 +62,19 @@ class JointAutoencoderTrainer:
             weight_decay=config.get('weight_decay', 0.01)
         )
         
-        # Scheduler
-        self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        # Scheduler - Use ReduceLROnPlateau for better convergence
+        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
-            T_max=config.get('epochs', 50)
+            mode='min',
+            factor=0.5,
+            patience=3,
+            verbose=True,
+            min_lr=1e-6
         )
+        
+        # Early stopping
+        self.patience = config.get('early_stopping_patience', 5)
+        self.patience_counter = 0
         
         # Logging
         self.log_dir = Path(config.get('log_dir', 'logs/joint_autoencoder'))
@@ -101,8 +109,8 @@ class JointAutoencoderTrainer:
             # Validate
             val_loss_dict = self.validate(epoch)
             
-            # Step scheduler
-            self.scheduler.step()
+            # Step scheduler based on validation loss
+            self.scheduler.step(val_loss_dict['total'])
             
             # Log
             logger.info(f"Train Loss: {train_loss_dict['total']:.6f} "
@@ -124,11 +132,21 @@ class JointAutoencoderTrainer:
             if (epoch + 1) % self.config.get('save_interval', 5) == 0:
                 self.save_checkpoint(epoch, val_loss_dict['total'])
             
-            # Save best model
+            # Save best model and check early stopping
             if val_loss_dict['total'] < self.best_val_loss:
                 self.best_val_loss = val_loss_dict['total']
+                self.patience_counter = 0  # Reset patience counter
                 self.save_checkpoint(epoch, val_loss_dict['total'], is_best=True)
                 logger.info(f"New best model saved with val loss: {val_loss_dict['total']:.6f}")
+            else:
+                self.patience_counter += 1
+                logger.info(f"No improvement. Patience: {self.patience_counter}/{self.patience}")
+                
+                # Early stopping
+                if self.patience_counter >= self.patience:
+                    logger.info(f"Early stopping triggered at epoch {epoch + 1}")
+                    logger.info(f"Best validation loss: {self.best_val_loss:.6f}")
+                    break
         
         logger.info("Training complete!")
         self.writer.close()
@@ -149,13 +167,13 @@ class JointAutoencoderTrainer:
         pbar = tqdm(self.train_loader, desc=f"Training Epoch {epoch + 1}")
         
         for batch_idx, batch in enumerate(pbar):
-            # Get ALL data (ERA5 + IBTrACS)
-            past_frames = batch['past_frames'].to(self.device)      # (B, T_past, C, H, W)
-            future_frames = batch['future_frames'].to(self.device)  # (B, T_future, C, H, W)
-            past_track = batch['track_past'].to(self.device)        # (B, T_past, 2)
-            future_track = batch['track_future'].to(self.device)    # (B, T_future, 2)
-            past_intensity = batch['intensity_past'].to(self.device)    # (B, T_past)
-            future_intensity = batch['intensity_future'].to(self.device)  # (B, T_future)
+            # Get ALL data (ERA5 + IBTrACS) - ensure float32
+            past_frames = batch['past_frames'].to(self.device).float()      # (B, T_past, C, H, W)
+            future_frames = batch['future_frames'].to(self.device).float()  # (B, T_future, C, H, W)
+            past_track = batch['track_past'].to(self.device).float()        # (B, T_past, 2)
+            future_track = batch['track_future'].to(self.device).float()    # (B, T_future, 2)
+            past_intensity = batch['intensity_past'].to(self.device).float()    # (B, T_past)
+            future_intensity = batch['intensity_future'].to(self.device).float()  # (B, T_future)
             
             # Get expected ERA5 channels from model config
             # Model expects era5_channels, but data might have more (e.g., 48 vs 40)
@@ -172,9 +190,9 @@ class JointAutoencoderTrainer:
             B, T, C, H, W = frames.shape
             
             # Flatten temporal dimension for processing
-            frames_flat = frames.reshape(B * T, C, H, W)
-            tracks_flat = tracks.reshape(B * T, 2)
-            intensities_flat = intensities.reshape(B * T)
+            frames_flat = frames.reshape(B * T, C, H, W).float()
+            tracks_flat = tracks.reshape(B * T, 2).float()
+            intensities_flat = intensities.reshape(B * T).float()
             
             # Forward pass through JOINT autoencoder
             outputs = self.model(frames_flat, tracks_flat, intensities_flat)
@@ -261,13 +279,13 @@ class JointAutoencoderTrainer:
         
         with torch.no_grad():
             for batch in tqdm(self.val_loader, desc="Validating"):
-                # Get data
-                past_frames = batch['past_frames'].to(self.device)
-                future_frames = batch['future_frames'].to(self.device)
-                past_track = batch['track_past'].to(self.device)
-                future_track = batch['track_future'].to(self.device)
-                past_intensity = batch['intensity_past'].to(self.device)
-                future_intensity = batch['intensity_future'].to(self.device)
+                # Get data - ensure float32
+                past_frames = batch['past_frames'].to(self.device).float()
+                future_frames = batch['future_frames'].to(self.device).float()
+                past_track = batch['track_past'].to(self.device).float()
+                future_track = batch['track_future'].to(self.device).float()
+                past_intensity = batch['intensity_past'].to(self.device).float()
+                future_intensity = batch['intensity_future'].to(self.device).float()
                 
                 # Combine
                 frames = torch.cat([past_frames, future_frames], dim=1)
@@ -277,9 +295,9 @@ class JointAutoencoderTrainer:
                 B, T, C, H, W = frames.shape
                 
                 # Flatten
-                frames_flat = frames.reshape(B * T, C, H, W)
-                tracks_flat = tracks.reshape(B * T, 2)
-                intensities_flat = intensities.reshape(B * T)
+                frames_flat = frames.reshape(B * T, C, H, W).float()
+                tracks_flat = tracks.reshape(B * T, 2).float()
+                intensities_flat = intensities.reshape(B * T).float()
                 
                 # Forward pass
                 outputs = self.model(frames_flat, tracks_flat, intensities_flat)

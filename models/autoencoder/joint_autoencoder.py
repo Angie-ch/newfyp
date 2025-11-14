@@ -33,7 +33,8 @@ class JointAutoencoder(nn.Module):
         era5_channels: int = 40,
         latent_channels: int = 8,
         hidden_dims: list = None,
-        use_attention: bool = True
+        use_attention: bool = True,
+        dropout: float = 0.1
     ):
         super().__init__()
         
@@ -43,6 +44,7 @@ class JointAutoencoder(nn.Module):
         self.era5_channels = era5_channels
         self.latent_channels = latent_channels
         self.hidden_dims = hidden_dims
+        self.dropout = dropout
         
         # ═════════════════════════════════════════════════════════════
         # ENCODER: Fuse ERA5 + IBTrACS into unified latent
@@ -73,30 +75,30 @@ class JointAutoencoder(nn.Module):
         
         # Encoder Stage 1: 64x64 → 32x32
         self.encoder_stage1 = nn.ModuleList([
-            ResBlock(hidden_dims[0], hidden_dims[0]),
-            ResBlock(hidden_dims[0], hidden_dims[0]),
+            ResBlock(hidden_dims[0], hidden_dims[0], dropout=dropout),
+            ResBlock(hidden_dims[0], hidden_dims[0], dropout=dropout),
             Downsample(hidden_dims[0])
         ])
         
         # Encoder Stage 2: 32x32 → 16x16
         self.encoder_stage2 = nn.ModuleList([
-            ResBlock(hidden_dims[0], hidden_dims[1]),
-            ResBlock(hidden_dims[1], hidden_dims[1]),
+            ResBlock(hidden_dims[0], hidden_dims[1], dropout=dropout),
+            ResBlock(hidden_dims[1], hidden_dims[1], dropout=dropout),
             Downsample(hidden_dims[1])
         ])
         
         # Encoder Stage 3: 16x16 → 8x8
         self.encoder_stage3 = nn.ModuleList([
-            ResBlock(hidden_dims[1], hidden_dims[2]),
-            ResBlock(hidden_dims[2], hidden_dims[2]),
+            ResBlock(hidden_dims[1], hidden_dims[2], dropout=dropout),
+            ResBlock(hidden_dims[2], hidden_dims[2], dropout=dropout),
             Downsample(hidden_dims[2])
         ])
         
         # Bottleneck at 8x8
         self.encoder_bottleneck = nn.ModuleList([
-            ResBlock(hidden_dims[2], hidden_dims[3]),
+            ResBlock(hidden_dims[2], hidden_dims[3], dropout=dropout),
             AttentionBlock(hidden_dims[3]) if use_attention else nn.Identity(),
-            ResBlock(hidden_dims[3], hidden_dims[3]),
+            ResBlock(hidden_dims[3], hidden_dims[3], dropout=dropout),
         ])
         
         # Project to unified latent space
@@ -111,30 +113,30 @@ class JointAutoencoder(nn.Module):
         
         # Shared decoder backbone
         self.decoder_bottleneck = nn.ModuleList([
-            ResBlock(hidden_dims[3], hidden_dims[3]),
+            ResBlock(hidden_dims[3], hidden_dims[3], dropout=dropout),
             AttentionBlock(hidden_dims[3]) if use_attention else nn.Identity(),
-            ResBlock(hidden_dims[3], hidden_dims[2]),
+            ResBlock(hidden_dims[3], hidden_dims[2], dropout=dropout),
         ])
         
         # Decoder Stage 3: 8x8 → 16x16
         self.decoder_stage3 = nn.ModuleList([
             Upsample(hidden_dims[2]),
-            ResBlock(hidden_dims[2], hidden_dims[2]),
-            ResBlock(hidden_dims[2], hidden_dims[1]),
+            ResBlock(hidden_dims[2], hidden_dims[2], dropout=dropout),
+            ResBlock(hidden_dims[2], hidden_dims[1], dropout=dropout),
         ])
         
         # Decoder Stage 2: 16x16 → 32x32
         self.decoder_stage2 = nn.ModuleList([
             Upsample(hidden_dims[1]),
-            ResBlock(hidden_dims[1], hidden_dims[1]),
-            ResBlock(hidden_dims[1], hidden_dims[0]),
+            ResBlock(hidden_dims[1], hidden_dims[1], dropout=dropout),
+            ResBlock(hidden_dims[1], hidden_dims[0], dropout=dropout),
         ])
         
         # Decoder Stage 1: 32x32 → 64x64
         self.decoder_stage1 = nn.ModuleList([
             Upsample(hidden_dims[0]),
-            ResBlock(hidden_dims[0], hidden_dims[0]),
-            ResBlock(hidden_dims[0], hidden_dims[0]),
+            ResBlock(hidden_dims[0], hidden_dims[0], dropout=dropout),
+            ResBlock(hidden_dims[0], hidden_dims[0], dropout=dropout),
         ])
         
         # ═════════════════════════════════════════════════════════════

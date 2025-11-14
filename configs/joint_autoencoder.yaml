@@ -2,7 +2,7 @@
 # Encodes ERA5 + IBTrACS together, decodes separately
 
 data:
-  data_dir: "data/processed_temporal_split"
+  data_dir: "/Volumes/data/fyp2/data/data/processed_temporal_split"
   past_frames: 8
   future_frames: 12
   era5_channels: 48
@@ -12,18 +12,22 @@ model:
   latent_channels: 8
   hidden_dims: [64, 128, 256, 256]
   use_attention: true
+  dropout: 0.1  # Dropout for regularization
 
 training:
-  epochs: 50
+  epochs: 10  # Test with 10 epochs first
   batch_size: 8
   learning_rate: 1.0e-4
-  weight_decay: 0.01
+  weight_decay: 0.05  # Increased from 0.01 for better regularization
   gradient_clip: 1.0
   
-  # Loss weights
+  # Loss weights - adjusted for normalized data
   era5_weight: 1.0
-  track_weight: 10.0      # Higher weight for track accuracy
-  intensity_weight: 5.0   # Higher weight for intensity accuracy
+  track_weight: 1.0      # Reduced since data is now normalized
+  intensity_weight: 1.0  # Reduced since data is now normalized
+  
+  # Early stopping
+  early_stopping_patience: 5
   
   # Logging
   log_interval: 100

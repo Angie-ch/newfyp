@@ -1,4 +1,4 @@
-   python evaluate.py --autoencoder checkpoints/joint_autoencoder/best.pth --diffusion checkpoints/joint_diffusion/best.pth
+"""
 Complete Training Pipeline for Joint ERA5 + IBTrACS Model
 
 This script trains the complete pipeline:
@@ -175,7 +175,8 @@ def train_autoencoder(config: dict, device: str):
         era5_channels=config['model']['era5_channels'],
         latent_channels=config['model']['latent_channels'],
         hidden_dims=config['model'].get('hidden_dims', [64, 128, 256, 256]),
-        use_attention=config['model'].get('use_attention', True)
+        use_attention=config['model'].get('use_attention', True),
+        dropout=config['model'].get('dropout', 0.1)
     )
     
     logger.info(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
@@ -236,7 +237,8 @@ def train_diffusion(config: dict, device: str, autoencoder_path: str = None):
         era5_channels=config['model']['era5_channels'],
         latent_channels=config['model']['latent_channels'],
         hidden_dims=config['model'].get('hidden_dims', [64, 128, 256, 256]),
-        use_attention=config['model'].get('use_attention', True)
+        use_attention=config['model'].get('use_attention', True),
+        dropout=config['model'].get('dropout', 0.1)
     )
     
     checkpoint = torch.load(autoencoder_path, map_location=device)

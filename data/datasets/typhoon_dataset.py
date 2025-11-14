@@ -1,27 +1,41 @@
 """
-Typhoon Dataset for loading processed temporal split data
+Typhoon Dataset for loading processed ERA5 + IBTrACS data
 """
 
 import numpy as np
 import torch
+from torch.utils.data import Dataset
 from pathlib import Path
-from typing import Dict, Optional
-import pickle
-import logging
-
-logger = logging.getLogger(__name__)
+from typing import Optional, Dict, Any
+import json
 
 
-class TyphoonDataset:
+class TyphoonDataset(Dataset):
     """
-    Dataset for loading typhoon data from processed temporal split structure
+    Dataset for loading typhoon prediction data with ERA5 frames and IBTrACS tracks.
     
-    Expected directory structure:
+    Expected data structure:
         data_dir/
-            train/cases/*.npz
-            val/cases/*.npz
-            test/cases/*.npz
-            normalization_stats.pkl
+            train/
+                cases/
+                    *.npz files
+            val/
+                cases/
+                    *.npz files
+            test/
+                cases/
+                    *.npz files
+    
+    Each .npz file contains:
+        - past_frames: (T_past, C, H, W) - ERA5 frames for past timesteps
+        - future_frames: (T_future, C, H, W) - ERA5 frames for future timesteps
+        - track_past: (T_past, 2) - past track positions [lat, lon]
+        - track_future: (T_future, 2) - future track positions
+        - intensity_past: (T_past,) - past wind intensities
+        - intensity_future: (T_future,) - future wind intensities
+        - pressure_past: (T_past,) - past central pressures
+        - pressure_future: (T_future,) - future central pressures
+        - case_id, storm_id, storm_name, year, sample_index: metadata
     """
     
     def __init__(
@@ -29,187 +43,173 @@ class TyphoonDataset:
         data_dir: str,
         split: str = 'train',
         normalize: bool = True,
-        use_temporal_split: bool = True,
-        concat_ibtracs: bool = True
+        concat_ibtracs: bool = False,
+        use_temporal_split: bool = True
     ):
         """
-        Initialize dataset
+        Initialize the dataset.
         
         Args:
-            data_dir: Root directory containing train/val/test splits
+            data_dir: Root directory containing processed data
             split: 'train', 'val', or 'test'
-            normalize: Whether to normalize data
-            use_temporal_split: Whether to use temporal split structure
-            concat_ibtracs: Whether to concatenate IBTrACS data to ERA5
+            normalize: Whether to normalize ERA5 frames using global statistics
+            concat_ibtracs: Whether to concatenate IBTrACS channels to ERA5 frames
+            use_temporal_split: Whether to use temporal split structure (train/val/test subdirs)
         """
         self.data_dir = Path(data_dir)
         self.split = split
         self.normalize = normalize
-        self.use_temporal_split = use_temporal_split
         self.concat_ibtracs = concat_ibtracs
+        self.use_temporal_split = use_temporal_split
         
-        # Determine data directory based on split structure
+        # Find the cases directory
         if use_temporal_split:
-            # Temporal split structure: data_dir/train/cases/, data_dir/val/cases/, etc.
-            if (self.data_dir / split / 'cases').exists():
-                self.cases_dir = self.data_dir / split / 'cases'
-                self.stats_file = self.data_dir / 'normalization_stats.pkl'
-            else:
-                # Fallback: check if split directory exists
-                if (self.data_dir / split).exists():
-                    self.cases_dir = self.data_dir / split
-                    self.stats_file = self.data_dir / 'normalization_stats.pkl'
-                else:
-                    # Fallback: use data_dir directly
-                    self.cases_dir = self.data_dir
-                    self.stats_file = self.data_dir / 'normalization_stats.pkl'
+            # Structure: data_dir/train/cases/ or data_dir/val/cases/
+            cases_dir = self.data_dir / split / 'cases'
+            if not cases_dir.exists():
+                # Try without 'cases' subdirectory
+                cases_dir = self.data_dir / split
         else:
-            # Flat structure: all files in data_dir
-            self.cases_dir = self.data_dir
-            self.stats_file = self.data_dir / 'normalization_stats.pkl'
+            # Flat structure: data_dir/cases/
+            cases_dir = self.data_dir / 'cases'
+            if not cases_dir.exists():
+                cases_dir = self.data_dir
         
-        # Load case files (exclude macOS hidden files)
-        self.case_files = sorted([f for f in self.cases_dir.glob('*.npz') if not f.name.startswith('._')])
+        if not cases_dir.exists():
+            raise ValueError(f"Data directory not found: {cases_dir}")
         
-        if len(self.case_files) == 0:
-            logger.warning(f"No .npz files found in {self.cases_dir}")
+        # Find all .npz files (exclude macOS resource fork files)
+        all_files = list(cases_dir.glob('*.npz'))
+        self.sample_files = sorted([
+            f for f in all_files 
+            if not f.name.startswith('._')  # Skip macOS resource fork files
+        ])
         
-        logger.info(f"Loaded {len(self.case_files)} samples for {split} split")
+        if len(self.sample_files) == 0:
+            raise ValueError(f"No .npz files found in {cases_dir}")
         
-        # Load normalization statistics
-        self.norm_stats = None
-        if normalize and self.stats_file.exists():
-            with open(self.stats_file, 'rb') as f:
-                self.norm_stats = pickle.load(f)
-            logger.info(f"Loaded normalization statistics from {self.stats_file}")
-        elif normalize:
-            logger.warning(f"Normalization requested but stats file not found: {self.stats_file}")
+        # Load normalization statistics if needed
+        self.stats = None
+        if normalize:
+            stats_file = self.data_dir / 'statistics.json'
+            if not stats_file.exists() and use_temporal_split:
+                # Try in parent directory
+                stats_file = self.data_dir.parent / 'statistics.json'
+            
+            if stats_file.exists():
+                with open(stats_file, 'r') as f:
+                    self.stats = json.load(f)
+            else:
+                print(f"Warning: statistics.json not found at {stats_file}. "
+                      "Normalization will be skipped.")
+                self.normalize = False
     
     def __len__(self) -> int:
-        """Return number of samples"""
-        return len(self.case_files)
+        return len(self.sample_files)
     
-    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
         """
-        Get a sample from the dataset
+        Load a sample from the dataset.
         
         Returns:
-            Dictionary with keys:
-                - 'era5': ERA5 data tensor [past_frames, channels, H, W]
-                - 'ibtracs': IBTrACS data tensor [past_frames, features] (track + intensity)
-                - 'era5_future': Future ERA5 data [future_frames, channels, H, W] (optional)
-                - 'ibtracs_future': Future IBTrACS data [future_frames, features] (optional)
+            Dictionary containing:
+                - past_frames: (T_past, C, H, W) torch.Tensor
+                - future_frames: (T_future, C, H, W) torch.Tensor
+                - track_past: (T_past, 2) torch.Tensor
+                - track_future: (T_future, 2) torch.Tensor
+                - intensity_past: (T_past,) torch.Tensor
+                - intensity_future: (T_future,) torch.Tensor
+                - pressure_past: (T_past,) torch.Tensor (optional)
+                - pressure_future: (T_future,) torch.Tensor (optional)
+                - case_id: str
+                - storm_id: str
+                - storm_name: str (optional)
+                - year: int (optional)
         """
-        if idx >= len(self.case_files):
-            raise IndexError(f"Index {idx} out of range for dataset of size {len(self.case_files)}")
+        # Load .npz file
+        sample_file = self.sample_files[idx]
+        data = np.load(sample_file, allow_pickle=True)
         
-        # Load data file
-        case_file = self.case_files[idx]
-        data = np.load(case_file, allow_pickle=True)
+        # Extract arrays
+        past_frames = data['past_frames'].astype(np.float32)
+        future_frames = data['future_frames'].astype(np.float32)
+        track_past = data['track_past'].astype(np.float32)
+        track_future = data['track_future'].astype(np.float32)
+        intensity_past = data['intensity_past'].astype(np.float32)
+        intensity_future = data['intensity_future'].astype(np.float32)
         
-        # Extract ERA5 data (past frames)
-        era5_past = data['past_frames'].astype(np.float32)  # [T, C, H, W]
-        
-        # Extract IBTrACS data
-        track_past = data['track_past'].astype(np.float32)  # [T, 2] (lat, lon)
-        intensity_past = data['intensity_past'].astype(np.float32)  # [T]
-        pressure_past = data.get('pressure_past', np.zeros_like(intensity_past)).astype(np.float32)  # [T]
-        
-        # Combine IBTrACS features: [T, 2+1+1] = [T, 4]
-        # Features: lat, lon, intensity, pressure
-        ibtracs_past = np.concatenate([
-            track_past,  # [T, 2]
-            intensity_past[:, None],  # [T, 1]
-            pressure_past[:, None]  # [T, 1]
-        ], axis=1)  # [T, 4]
-        
-        # Normalize if requested
-        if self.normalize and self.norm_stats is not None:
-            # Normalize ERA5
-            era5_mean = self.norm_stats.get('era5_mean')
-            era5_std = self.norm_stats.get('era5_std')
-            if era5_mean is not None and era5_std is not None:
-                # Handle different shapes: mean/std might be [C] or [C, H, W]
-                if era5_mean.ndim == 1:
-                    era5_past = (era5_past - era5_mean[:, None, None]) / (era5_std[:, None, None] + 1e-8)
-                else:
-                    era5_past = (era5_past - era5_mean) / (era5_std + 1e-8)
+        # Normalize ERA5 frames if requested
+        if self.normalize and self.stats is not None:
+            mean = np.array(self.stats.get('mean', [0.0]))
+            std = np.array(self.stats.get('std', [1.0]))
             
-            # Normalize IBTrACS
-            track_mean = self.norm_stats.get('track_mean')
-            track_std = self.norm_stats.get('track_std')
-            if track_mean is not None and track_std is not None:
-                ibtracs_past[:, :2] = (ibtracs_past[:, :2] - track_mean) / (track_std + 1e-8)
+            # Ensure mean and std have correct shape for broadcasting
+            if mean.ndim == 0:
+                mean = mean.reshape(1, 1, 1)
+            elif mean.ndim == 1:
+                mean = mean.reshape(-1, 1, 1)
             
-            intensity_mean = self.norm_stats.get('intensity_mean')
-            intensity_std = self.norm_stats.get('intensity_std')
-            if intensity_mean is not None and intensity_std is not None:
-                ibtracs_past[:, 2] = (ibtracs_past[:, 2] - intensity_mean) / (intensity_std + 1e-8)
+            if std.ndim == 0:
+                std = std.reshape(1, 1, 1)
+            elif std.ndim == 1:
+                std = std.reshape(-1, 1, 1)
             
-            pressure_mean = self.norm_stats.get('pressure_mean')
-            pressure_std = self.norm_stats.get('pressure_std')
-            if pressure_mean is not None and pressure_std is not None:
-                ibtracs_past[:, 3] = (ibtracs_past[:, 3] - pressure_mean) / (pressure_std + 1e-8)
+            past_frames = (past_frames - mean) / (std + 1e-8)
+            future_frames = (future_frames - mean) / (std + 1e-8)
         
-        # Convert to tensors
-        era5_tensor = torch.from_numpy(era5_past)  # [T, C, H, W]
-        ibtracs_tensor = torch.from_numpy(ibtracs_past)  # [T, 4]
-        
-        # If concat_ibtracs is True, concatenate IBTrACS to ERA5 channels
-        # This creates a unified input: [T, C+4, H, W]
-        if self.concat_ibtracs:
-            # Expand IBTrACS to spatial dimensions: [T, 4] -> [T, 4, H, W]
-            T, C, H, W = era5_tensor.shape
-            ibtracs_expanded = ibtracs_tensor.unsqueeze(-1).unsqueeze(-1)  # [T, 4, 1, 1]
-            ibtracs_expanded = ibtracs_expanded.expand(-1, -1, H, W)  # [T, 4, H, W]
+        # Normalize Track and Intensity if statistics are available
+        if self.normalize and self.stats is not None:
+            # Track normalization (lat, lon)
+            track_mean = np.array(self.stats.get('track_mean', [70.0, 130.0]))  # Default: approximate center
+            track_std = np.array(self.stats.get('track_std', [30.0, 30.0]))      # Default: approximate std
             
-            # Concatenate: [T, C, H, W] + [T, 4, H, W] -> [T, C+4, H, W]
-            era5_tensor = torch.cat([era5_tensor, ibtracs_expanded], dim=1)
+            # Ensure track_mean and track_std have shape (2,) for broadcasting
+            if track_mean.ndim == 0:
+                track_mean = np.array([track_mean, track_mean])
+            if track_std.ndim == 0:
+                track_std = np.array([track_std, track_std])
+            
+            # Normalize: (x - mean) / std
+            track_past = (track_past - track_mean) / (track_std + 1e-8)
+            track_future = (track_future - track_mean) / (track_std + 1e-8)
+            
+            # Intensity normalization (wind speed)
+            intensity_mean = self.stats.get('intensity_mean', 10.0)  # Default: approximate mean
+            intensity_std = self.stats.get('intensity_std', 10.0)    # Default: approximate std
+            
+            intensity_past = (intensity_past - intensity_mean) / (intensity_std + 1e-8)
+            intensity_future = (intensity_future - intensity_mean) / (intensity_std + 1e-8)
         
-        # Prepare output dictionary with keys expected by trainer
+        # Convert to torch tensors
         sample = {
-            'past_frames': era5_tensor,  # [T, C, H, W]
-            'track_past': ibtracs_tensor[:, :2],  # [T, 2] (lat, lon)
-            'intensity_past': ibtracs_tensor[:, 2],  # [T] (intensity)
+            'past_frames': torch.from_numpy(past_frames),
+            'future_frames': torch.from_numpy(future_frames),
+            'track_past': torch.from_numpy(track_past),
+            'track_future': torch.from_numpy(track_future),
+            'intensity_past': torch.from_numpy(intensity_past),
+            'intensity_future': torch.from_numpy(intensity_future),
         }
         
-        # Add future frames if available
-        if 'future_frames' in data:
-            era5_future = data['future_frames'].astype(np.float32)
-            
-            # Normalize future ERA5
-            if self.normalize and self.norm_stats is not None:
-                era5_mean = self.norm_stats.get('era5_mean')
-                era5_std = self.norm_stats.get('era5_std')
-                if era5_mean is not None and era5_std is not None:
-                    if era5_mean.ndim == 1:
-                        era5_future = (era5_future - era5_mean[:, None, None]) / (era5_std[:, None, None] + 1e-8)
-                    else:
-                        era5_future = (era5_future - era5_mean) / (era5_std + 1e-8)
-            
-            sample['future_frames'] = torch.from_numpy(era5_future)
+        # Add pressure if available
+        if 'pressure_past' in data:
+            sample['pressure_past'] = torch.from_numpy(
+                data['pressure_past'].astype(np.float32)
+            )
+        if 'pressure_future' in data:
+            sample['pressure_future'] = torch.from_numpy(
+                data['pressure_future'].astype(np.float32)
+            )
         
-        if 'track_future' in data and 'intensity_future' in data:
-            track_future = data['track_future'].astype(np.float32)
-            intensity_future = data['intensity_future'].astype(np.float32)
-            
-            # Normalize future IBTrACS
-            if self.normalize and self.norm_stats is not None:
-                track_mean = self.norm_stats.get('track_mean')
-                track_std = self.norm_stats.get('track_std')
-                if track_mean is not None and track_std is not None:
-                    track_future = (track_future - track_mean) / (track_std + 1e-8)
-                
-                intensity_mean = self.norm_stats.get('intensity_mean')
-                intensity_std = self.norm_stats.get('intensity_std')
-                if intensity_mean is not None and intensity_std is not None:
-                    intensity_future = (intensity_future - intensity_mean) / (intensity_std + 1e-8)
-            
-            sample['track_future'] = torch.from_numpy(track_future)
-            sample['intensity_future'] = torch.from_numpy(intensity_future)
+        # Add metadata
+        sample['case_id'] = str(data.get('case_id', sample_file.stem))
+        sample['storm_id'] = str(data.get('storm_id', ''))
         
-        # Also keep original keys for backward compatibility
-        sample['era5'] = era5_tensor
-        sample['ibtracs'] = ibtracs_tensor
+        if 'storm_name' in data:
+            sample['storm_name'] = str(data['storm_name'])
+        if 'year' in data:
+            sample['year'] = int(data['year'])
+        if 'sample_index' in data:
+            sample['sample_index'] = int(data['sample_index'])
         
         return sample
+
