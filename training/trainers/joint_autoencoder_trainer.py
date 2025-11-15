@@ -128,9 +128,8 @@ class JointAutoencoderTrainer:
                 self.writer.add_scalar(f'Loss/val_{key}', val_loss_dict[key], epoch)
             self.writer.add_scalar('LR', self.optimizer.param_groups[0]['lr'], epoch)
             
-            # Save checkpoint
-            if (epoch + 1) % self.config.get('save_interval', 5) == 0:
-                self.save_checkpoint(epoch, val_loss_dict['total'])
+            # Save checkpoint every epoch
+            self.save_checkpoint(epoch, val_loss_dict['total'])
             
             # Save best model and check early stopping
             if val_loss_dict['total'] < self.best_val_loss:

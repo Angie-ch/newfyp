@@ -206,8 +206,19 @@ class TyphoonDataset(Dataset):
         
         if 'storm_name' in data:
             sample['storm_name'] = str(data['storm_name'])
+        
+        # Always include 'year' field for consistent batching
+        # Extract year from case_id if not in data, or use default
         if 'year' in data:
             sample['year'] = int(data['year'])
+        else:
+            # Try to extract year from case_id (format: "YYYYMMDD_HH")
+            try:
+                year_str = sample['case_id'].split('_')[0][:4]
+                sample['year'] = int(year_str)
+            except (ValueError, IndexError):
+                sample['year'] = 2000  # Default year
+        
         if 'sample_index' in data:
             sample['sample_index'] = int(data['sample_index'])
         
