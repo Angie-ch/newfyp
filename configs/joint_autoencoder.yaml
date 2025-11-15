@@ -2,7 +2,7 @@
 # Encodes ERA5 + IBTrACS together, decodes separately
 
 data:
-  data_dir: "/Volumes/data/fyp2/data/data/processed_temporal_split"
+  data_dir: "data/processed_temporal_split"
   past_frames: 8
   future_frames: 12
   era5_channels: 48
@@ -15,7 +15,7 @@ model:
   dropout: 0.1  # Dropout for regularization
 
 training:
-  epochs: 10  # Test with 10 epochs first
+  epochs: 50  # Train for 50 epochs
   batch_size: 8
   learning_rate: 1.0e-4
   weight_decay: 0.05  # Increased from 0.01 for better regularization

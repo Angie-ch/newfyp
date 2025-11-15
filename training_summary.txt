@@ -1,0 +1,65 @@
+=== JOINT AUTOENCODER TRAINING SUMMARY ===
+
+Training Status: COMPLETE (Early Stopping at Epoch 8)
+
+=== Epoch-by-Epoch Loss Summary ===
+
+Epoch 1:
+  Train Loss: 23,234.04
+  Val Loss:   1,697.40
+  Status: Initial best
+
+Epoch 2:
+  Train Loss: 3,693.18
+  Val Loss:   2,008.15
+  Status: No improvement
+
+Epoch 3:
+  Train Loss: 3,082.96
+  Val Loss:   950.66
+  Status: NEW BEST MODEL ✓
+
+Epoch 4:
+  Train Loss: 2,624.76
+  Val Loss:   2,647.76
+  Status: No improvement (Patience: 1/5)
+
+Epoch 5:
+  Train Loss: 2,508.74
+  Val Loss:   1,264.67
+  Status: No improvement (Patience: 2/5)
+
+Epoch 6:
+  Train Loss: 2,583.48
+  Val Loss:   1,243.72
+  Status: No improvement (Patience: 3/5)
+
+Epoch 7:
+  Train Loss: 2,774.63
+  Val Loss:   6,523.50
+  Status: No improvement (Patience: 4/5)
+
+Epoch 8:
+  Train Loss: 2,038.56
+  Val Loss:   1,790.72
+  Status: No improvement (Patience: 5/5) - EARLY STOPPING
+
+=== Final Results ===
+
+Best Model: Epoch 3
+Best Validation Loss: 950.66
+
+Training Loss Improvement: 23,234 → 2,039 (91.2% reduction)
+Best Validation Loss: 950.66
+
+=== Component Losses (Best Model - Epoch 3) ===
+  ERA5 Loss:     0.297
+  Track Loss:   69.36
+  Intensity Loss: (not shown in log, but part of total)
+
+=== Training Notes ===
+- Early stopping triggered after 5 epochs without improvement
+- Model successfully learned: Train loss decreased by 91.2%
+- Best validation performance achieved at epoch 3
+- Model saved to: checkpoints/joint_autoencoder/best.pth
+
