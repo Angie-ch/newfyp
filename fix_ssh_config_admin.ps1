@@ -88,3 +88,13 @@ Write-Host "  ssh $env:USERNAME@$ipAddress" -ForegroundColor White
 Write-Host ""
 Write-Host "=== Done ===" -ForegroundColor Green
 
+
+
+
+
+
+
+
+
+
+

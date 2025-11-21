@@ -124,3 +124,13 @@ After SSH is set up:
 3. Set up port forwarding if needed
 4. Connect from Cursor using Remote SSH extension
 
+
+
+
+
+
+
+
+
+
+

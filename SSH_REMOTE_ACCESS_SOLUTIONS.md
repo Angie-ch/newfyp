@@ -182,3 +182,13 @@ If these fail, the machines are likely on different networks.
 
 **Next Step**: Choose one of the solutions above. **Tailscale is recommended** for secure, permanent remote access.
 
+
+
+
+
+
+
+
+
+
+

@@ -119,3 +119,13 @@ Write-Host "4. Verify Windows Firewall is not blocking:" -ForegroundColor White
 Write-Host "   Get-NetFirewallRule | Where-Object {$_.DisplayName -like '*SSH*'}" -ForegroundColor Gray
 Write-Host ""
 
+
+
+
+
+
+
+
+
+
+

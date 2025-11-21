@@ -77,3 +77,13 @@ ssh-copy-id fyp@10.119.178.85
 - Configuration file: `C:\ProgramData\ssh\sshd_config`
 - Logs: `C:\ProgramData\ssh\logs\sshd.log`
 
+
+
+
+
+
+
+
+
+
+

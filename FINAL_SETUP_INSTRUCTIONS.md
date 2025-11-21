@@ -90,3 +90,13 @@ ssh fyp@<tailscale-ip>
 
 It's easier to set up and more reliable, especially if you're behind firewalls or have network restrictions.
 
+
+
+
+
+
+
+
+
+
+

@@ -260,9 +260,14 @@ def train_diffusion(config: dict, device: str, autoencoder_path: str = None):
     logger.info(f"Diffusion model parameters: {sum(p.numel() for p in diffusion_model.parameters()):,}")
     
     # Get training config for diffusion
-    train_config = config['training']['diffusion'].copy()
-    train_config['log_interval'] = config['training'].get('log_interval', 50)
-    train_config['save_interval'] = config['training'].get('save_interval', 5)
+    # Check if nested structure exists (joint_pipeline.yaml) or flat (joint_diffusion.yaml)
+    if 'diffusion' in config['training']:
+        train_config = config['training']['diffusion'].copy()
+        train_config['log_interval'] = config['training'].get('log_interval', 50)
+        train_config['save_interval'] = config['training'].get('save_interval', 5)
+    else:
+        # Flat structure: use training config directly
+        train_config = config['training'].copy()
     
     # Create trainer
     trainer = JointDiffusionTrainer(
@@ -275,7 +280,10 @@ def train_diffusion(config: dict, device: str, autoencoder_path: str = None):
     )
     
     # Train
-    epochs = config['training']['diffusion']['epochs']
+    if 'diffusion' in config['training']:
+        epochs = config['training']['diffusion']['epochs']
+    else:
+        epochs = config['training'].get('epochs', 100)
     trainer.train(epochs=epochs)
     
     logger.info("Diffusion model training complete!")

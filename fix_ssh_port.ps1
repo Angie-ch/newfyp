@@ -21,3 +21,13 @@ if ($port22) {
 Write-Host "`nConnection command:" -ForegroundColor Cyan
 Write-Host "  ssh fyp@10.119.178.85" -ForegroundColor White
 
+
+
+
+
+
+
+
+
+
+

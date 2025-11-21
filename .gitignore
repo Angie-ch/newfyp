@@ -1,4 +1,50 @@
-# Python
+# ============================================
+# Typhoon Prediction Project - .gitignore
+# ============================================
+
+# ====================
+# Data Files (Large)
+# ====================
+*.npz
+*.nc
+*.npy
+*.h5
+*.hdf5
+*.dat
+data/era5/*.nc
+data/era5_data/
+data/processed_temporal_split/
+D:/typhoon_data_2018_2021_full/
+interpolated_typhoon_tracks_*.csv
+# Large CSV files (>100MB)
+data/raw/ibtracs_wp_full.csv
+
+# ====================
+# Model Checkpoints
+# ====================
+*.pth
+*.pt
+*.ckpt
+checkpoints/
+checkpoints_*/
+best_model*.pth
+autoencoder_*.pth
+diffusion_*.pth
+
+# ====================
+# Training Logs
+# ====================
+*.log
+*.txt
+regeneration_log*.txt
+training_log*.txt
+training_history.json
+*.pid
+*.out
+
+# ====================
+# Python Cache
+# ====================
 __pycache__/
 *.py[cod]
 *$py.class
@@ -16,94 +62,126 @@ parts/
 sdist/
 var/
 wheels/
+pip-wheel-metadata/
+share/python-wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+MANIFEST
 
-# Virtual Environment
+# ====================
+# Virtual Environments
+# ====================
+pytorch_gpu/
 venv/
 env/
 ENV/
-pytorch_gpu/
-.venv/
+env.bak/
+venv.bak/
 
-# IDE
+# ====================
+# Jupyter Notebooks
+# ====================
+.ipynb_checkpoints/
+*.ipynb
+
+# ====================
+# IDE & Editors
+# ====================
 .vscode/
 .idea/
 *.swp
 *.swo
+*.swn
 *~
+.project
+.pydevproject
+.settings/
+
+# ====================
+# OS Files
+# ====================
 .DS_Store
-
-# Jupyter Notebook
-.ipynb_checkpoints
-*.ipynb
-
-# PyTorch
-*.pth
-*.pt
-*.ckpt
-checkpoints/
-*.pkl
-*.h5
-*.hdf5
-
-# Data files (too large for GitHub)
-data/processed_temporal_split/
-data/raw/
-*.npz
-*.nc
-*.hdf5
-
-# Results and outputs
-results/
-logs/
-*.log
-evaluation_output*.log
-training_output*.log
-
-# TensorBoard
-runs/
-tb_logs/
-
-# OS
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
-.DS_Store
+desktop.ini
 
-# Environment variables
-.env
-.env.local
+# ====================
+# Images (keep small ones)
+# ====================
+# *.png  # Keep PNG for documentation
+# *.jpg
 
-# Temporary files
+# ====================
+# External Repos (cloned)
+# ====================
+forecast-video-diffmodels/
+forecast-diffmodels/
+imagen-pytorch/
+
+# ====================
+# Temporary Files
+# ====================
 *.tmp
 *.temp
 *.bak
-*.cache
+*.backup
 
-# Large model files
-models/*.pth
-models/*.pt
-*.safetensors
+# ====================
+# Git Merge Files
+# ====================
+*.orig
+*.rej
 
-# Training outputs
-outputs/
+# ====================
+# Coverage Reports
+# ====================
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# ====================
+# Documentation Build
+# ====================
+docs/_build/
+docs/_static/
+docs/_templates/
+
+# ====================
+# mypy
+# ====================
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# ====================
+# Pyre type checker
+# ====================
+.pyre/
+
+# ====================
+# Weights & Biases
+# ====================
 wandb/
 
+# ====================
+# MLflow
+# ====================
+mlruns/
 
-# macOS 隐藏文件
-._*
-.DS_Store
-
-# Python 缓存
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-
-# 大文件
-*.tar.gz
-*.pth
-*.pt
-checkpoints/
-logs/
-data/processed_temporal_split/
+# ====================
+# TensorBoard
+# ====================
+runs/
+tensorboard_logs/

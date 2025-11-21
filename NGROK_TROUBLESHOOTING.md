@@ -112,3 +112,13 @@ Given the persistent authentication issues, **I recommend switching to Tailscale
 - Doesn't require keeping a window open
 - Works better through firewalls
 
+
+
+
+
+
+
+
+
+
+

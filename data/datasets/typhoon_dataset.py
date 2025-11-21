@@ -78,15 +78,37 @@ class TyphoonDataset(Dataset):
         if not cases_dir.exists():
             raise ValueError(f"Data directory not found: {cases_dir}")
         
-        # Find all .npz files (exclude macOS resource fork files)
-        all_files = list(cases_dir.glob('*.npz'))
-        self.sample_files = sorted([
-            f for f in all_files 
-            if not f.name.startswith('._')  # Skip macOS resource fork files
-        ])
+        # Find all sample files - support both .npz and .npy formats
+        # .npy format: base_name_*.npy files (like LT3P)
+        # .npz format: base_name.npz (legacy)
+        npz_files = list(cases_dir.glob('*.npz'))
+        npy_bases = set()
         
-        if len(self.sample_files) == 0:
-            raise ValueError(f"No .npz files found in {cases_dir}")
+        # Find .npy files (new format like LT3P)
+        for npy_file in cases_dir.glob('*_past_frames.npy'):
+            base_name = npy_file.stem.replace('_past_frames', '')
+            npy_bases.add(base_name)
+        
+        # Use .npy format if available, otherwise fall back to .npz
+        if npy_bases:
+            self.use_npy_format = True
+            self.sample_bases = sorted([
+                base for base in npy_bases
+                if not base.startswith('._')  # Skip macOS resource fork files
+            ])
+            self.sample_files = None  # Not used for .npy format
+        else:
+            self.use_npy_format = False
+            self.sample_files = sorted([
+                f for f in npz_files 
+                if not f.name.startswith('._') and not f.name.endswith('_meta.npz')
+            ])
+            self.sample_bases = None
+        
+        if not self.use_npy_format and len(self.sample_files) == 0:
+            raise ValueError(f"No .npz or .npy files found in {cases_dir}")
+        if self.use_npy_format and len(self.sample_bases) == 0:
+            raise ValueError(f"No .npy sample files found in {cases_dir}")
         
         # Load normalization statistics if needed
         self.stats = None
@@ -105,7 +127,10 @@ class TyphoonDataset(Dataset):
                 self.normalize = False
     
     def __len__(self) -> int:
-        return len(self.sample_files)
+        if self.use_npy_format:
+            return len(self.sample_bases)
+        else:
+            return len(self.sample_files)
     
     def __getitem__(self, idx: int) -> Dict[str, Any]:
         """
@@ -126,17 +151,73 @@ class TyphoonDataset(Dataset):
                 - storm_name: str (optional)
                 - year: int (optional)
         """
-        # Load .npz file
-        sample_file = self.sample_files[idx]
-        data = np.load(sample_file, allow_pickle=True)
-        
-        # Extract arrays
-        past_frames = data['past_frames'].astype(np.float32)
-        future_frames = data['future_frames'].astype(np.float32)
-        track_past = data['track_past'].astype(np.float32)
-        track_future = data['track_future'].astype(np.float32)
-        intensity_past = data['intensity_past'].astype(np.float32)
-        intensity_future = data['intensity_future'].astype(np.float32)
+        # Load data - support both .npy (LT3P format) and .npz (legacy)
+        if self.use_npy_format:
+            # Load .npy format (like LT3P) - faster loading
+            base_name = self.sample_bases[idx]
+            cases_dir = self.data_dir / self.split / 'cases' if self.use_temporal_split else self.data_dir / 'cases'
+            
+            # Load each component from separate .npy files
+            past_frames = np.load(cases_dir / f"{base_name}_past_frames.npy").astype(np.float32)
+            future_frames = np.load(cases_dir / f"{base_name}_future_frames.npy").astype(np.float32)
+            track_past = np.load(cases_dir / f"{base_name}_track_past.npy").astype(np.float32)
+            track_future = np.load(cases_dir / f"{base_name}_track_future.npy").astype(np.float32)
+            intensity_past = np.load(cases_dir / f"{base_name}_intensity_past.npy").astype(np.float32)
+            intensity_future = np.load(cases_dir / f"{base_name}_intensity_future.npy").astype(np.float32)
+            
+            # Load metadata
+            metadata_file = cases_dir / f"{base_name}_meta.npz"
+            if metadata_file.exists():
+                metadata = np.load(metadata_file, allow_pickle=True)
+                case_id = str(metadata.get('case_id', base_name))
+                storm_id = str(metadata.get('storm_id', ''))
+                storm_name = str(metadata.get('storm_name', '')) if 'storm_name' in metadata else None
+                year = int(metadata.get('year', 2000))
+                sample_index = int(metadata.get('window_index', 0))
+            else:
+                # Fallback if metadata file doesn't exist
+                case_id = base_name
+                storm_id = ''
+                storm_name = None
+                year = 2000
+                sample_index = 0
+            
+            # Load pressure if available
+            pressure_past = None
+            pressure_future = None
+            pressure_past_file = cases_dir / f"{base_name}_pressure_past.npy"
+            pressure_future_file = cases_dir / f"{base_name}_pressure_future.npy"
+            if pressure_past_file.exists():
+                pressure_past = np.load(pressure_past_file).astype(np.float32)
+            if pressure_future_file.exists():
+                pressure_future = np.load(pressure_future_file).astype(np.float32)
+        else:
+            # Load legacy .npz format
+            sample_file = self.sample_files[idx]
+            data = np.load(sample_file, allow_pickle=True)
+            
+            # Extract arrays
+            past_frames = data['past_frames'].astype(np.float32)
+            future_frames = data['future_frames'].astype(np.float32)
+            track_past = data['track_past'].astype(np.float32)
+            track_future = data['track_future'].astype(np.float32)
+            intensity_past = data['intensity_past'].astype(np.float32)
+            intensity_future = data['intensity_future'].astype(np.float32)
+            
+            # Extract metadata
+            case_id = str(data.get('case_id', sample_file.stem))
+            storm_id = str(data.get('storm_id', ''))
+            storm_name = str(data['storm_name']) if 'storm_name' in data else None
+            year = int(data['year']) if 'year' in data else 2000
+            sample_index = int(data['sample_index']) if 'sample_index' in data else 0
+            
+            # Load pressure if available
+            pressure_past = None
+            pressure_future = None
+            if 'pressure_past' in data:
+                pressure_past = data['pressure_past'].astype(np.float32)
+            if 'pressure_future' in data:
+                pressure_future = data['pressure_future'].astype(np.float32)
         
         # Normalize ERA5 frames if requested
         if self.normalize and self.stats is not None:
@@ -190,37 +271,21 @@ class TyphoonDataset(Dataset):
             'intensity_future': torch.from_numpy(intensity_future),
         }
         
-        # Add pressure if available
-        if 'pressure_past' in data:
-            sample['pressure_past'] = torch.from_numpy(
-                data['pressure_past'].astype(np.float32)
-            )
-        if 'pressure_future' in data:
-            sample['pressure_future'] = torch.from_numpy(
-                data['pressure_future'].astype(np.float32)
-            )
+        # Add pressure if available (already loaded above for both formats)
+        if pressure_past is not None:
+            sample['pressure_past'] = torch.from_numpy(pressure_past)
+        if pressure_future is not None:
+            sample['pressure_future'] = torch.from_numpy(pressure_future)
         
-        # Add metadata
-        sample['case_id'] = str(data.get('case_id', sample_file.stem))
-        sample['storm_id'] = str(data.get('storm_id', ''))
+        # Add metadata (already extracted above for both formats)
+        sample['case_id'] = case_id
+        sample['storm_id'] = storm_id
         
-        if 'storm_name' in data:
-            sample['storm_name'] = str(data['storm_name'])
+        if storm_name:
+            sample['storm_name'] = storm_name
         
-        # Always include 'year' field for consistent batching
-        # Extract year from case_id if not in data, or use default
-        if 'year' in data:
-            sample['year'] = int(data['year'])
-        else:
-            # Try to extract year from case_id (format: "YYYYMMDD_HH")
-            try:
-                year_str = sample['case_id'].split('_')[0][:4]
-                sample['year'] = int(year_str)
-            except (ValueError, IndexError):
-                sample['year'] = 2000  # Default year
-        
-        if 'sample_index' in data:
-            sample['sample_index'] = int(data['sample_index'])
+        sample['year'] = year
+        sample['sample_index'] = sample_index
         
         return sample
 

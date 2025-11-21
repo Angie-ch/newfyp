@@ -16,6 +16,11 @@ from typing import Dict, List, Optional
 import pickle
 from collections import defaultdict
 import sys
+import warnings
+
+# Suppress dask performance warnings to reduce log noise
+warnings.filterwarnings('ignore', category=UserWarning, module='dask')
+warnings.filterwarnings('ignore', message='.*PerformanceWarning.*')
 
 # Add parent directory to path
 sys.path.append(str(Path(__file__).parent))
@@ -51,7 +56,9 @@ def generate_samples_by_storm(
     future_timesteps: int = 12,
     stride: int = None,
     era5_loader: Optional[ERA5Loader] = None,
-    era5_datasets: Optional[Dict] = None
+    era5_datasets: Optional[Dict] = None,
+    load_era5_on_demand: bool = True,
+    skip_early_timesteps: int = 0
 ) -> tuple:
     """
     Generate training samples organized by year using systematic sliding windows
@@ -95,12 +102,39 @@ def generate_samples_by_storm(
             continue
         
         # Get ERA5 data - REQUIRED, no synthetic data allowed
-        if not era5_datasets or storm_id not in era5_datasets:
+        era5_dataset = None
+        if load_era5_on_demand and era5_loader is not None:
+            # Load ERA5 on-demand to save memory
+            try:
+                storm_data_temp = ibtracs_loader.get_storm_data(df, storm_id)
+                start_time = pd.to_datetime(storm_data_temp['times'][0]) - pd.Timedelta(hours=6)
+                end_time = pd.to_datetime(storm_data_temp['times'][-1]) + pd.Timedelta(hours=6)
+                lats = storm_data_temp['lats']
+                lons = storm_data_temp['lons']
+                lat_range = (float(np.min(lats) - 10), float(np.max(lats) + 10))
+                lon_range = (float(np.min(lons) - 10), float(np.max(lons) + 10))
+                
+                era5_dataset = era5_loader.load_era5_from_daily_files(
+                    start_time=start_time,
+                    end_time=end_time,
+                    lat_range=lat_range,
+                    lon_range=lon_range
+                )
+            except Exception as e:
+                print(f"  [WARNING] Failed to load ERA5 for {storm_id}: {e}", flush=True)
+                storms_skipped += 1
+                continue
+        elif era5_datasets and storm_id in era5_datasets:
+            era5_dataset = era5_datasets[storm_id]
+        else:
             # Skip this storm if no ERA5 data available
             storms_skipped += 1
             continue
         
-        era5_dataset = era5_datasets[storm_id]
+        if era5_dataset is None:
+            storms_skipped += 1
+            continue
+        
         use_era5 = True
         
         # Generate ALL systematic samples from this storm using sliding windows
@@ -111,7 +145,17 @@ def generate_samples_by_storm(
         actual_stride = stride if stride is not None else past_timesteps
         
         # Generate sliding window samples
-        for start_idx in range(0, n_total - past_timesteps - future_timesteps + 1, actual_stride):
+        failed_samples = 0
+        max_failed_consecutive = 5  # Skip storm if 5 consecutive samples fail
+        consecutive_failures = 0
+        
+        # Start from skip_early_timesteps to ensure ERA5 history exists
+        for start_idx in range(skip_early_timesteps, n_total - past_timesteps - future_timesteps + 1, actual_stride):
+            # Check if we should skip this storm due to too many failures
+            if consecutive_failures >= max_failed_consecutive:
+                print(f"  [WARNING] Skipping remaining samples for {storm_id} (too many consecutive failures)", flush=True)
+                break
+            
             # Create a sample starting at this index by slicing the storm data
             sliced_storm_data = {
                 'storm_id': storm_data['storm_id'],
@@ -138,21 +182,37 @@ def generate_samples_by_storm(
                 sample['window_index'] = len(storm_samples)
                 sample['start_idx'] = start_idx
                 storm_samples.append(sample)
+                consecutive_failures = 0  # Reset counter on success
+            else:
+                failed_samples += 1
+                consecutive_failures += 1
         
-        # Add metadata and organize by year
-        for sample in storm_samples:
-            sample['year'] = year
-            samples_by_year[year].append(sample)
+        # Check if we got any valid samples from this storm
+        if len(storm_samples) == 0:
+            print(f"  [WARNING] No valid samples generated for {storm_id}, skipping storm", flush=True)
+            storms_skipped += 1
+        else:
+            # Add metadata and organize by year
+            for sample in storm_samples:
+                sample['year'] = year
+                samples_by_year[year].append(sample)
+            
+            samples_by_storm[storm_id] = storm_samples
+            storms_processed += 1
         
-        samples_by_storm[storm_id] = storm_samples
-        
-        storms_processed += 1
-        if storms_processed % 10 == 0:
+        # Close ERA5 dataset to free memory if loaded on-demand
+        if load_era5_on_demand and era5_dataset is not None:
+            try:
+                era5_dataset.close()
+            except:
+                pass
+            era5_dataset = None
+        if storms_processed % 5 == 0:  # More frequent updates
             total_samples = sum(len(v) for v in samples_by_year.values())
-            print(f"  Processed {storms_processed}/{len(storm_ids)} storms, {total_samples} samples generated...")
+            print(f"  Processed {storms_processed}/{len(storm_ids)} storms, {total_samples} samples generated...", flush=True)
     
     total_samples = sum(len(v) for v in samples_by_year.values())
-    print(f"\n✓ Generated {total_samples} samples from {storms_processed} storms")
+    print(f"\n[OK] Generated {total_samples} samples from {storms_processed} storms")
     print(f"  Skipped {storms_skipped} storms (insufficient data)")
     
     # Print distribution by year
@@ -260,7 +320,7 @@ def save_samples_by_split(
                     
                     sample_count += 1
         
-        print(f"  ✓ Saved {sample_count} samples from {storm_count} storms to {split_name}/ directory")
+        print(f"  [OK] Saved {sample_count} samples from {storm_count} storms to {split_name}/ directory")
     
     # Save metadata
     metadata = {
@@ -277,7 +337,7 @@ def save_samples_by_split(
     with open(output_dir / 'dataset_metadata.pkl', 'wb') as f:
         pickle.dump(metadata, f)
     
-    print(f"\n✓ Saved metadata to {output_dir / 'dataset_metadata.pkl'}")
+    print(f"\n[OK] Saved metadata to {output_dir / 'dataset_metadata.pkl'}")
     print(f"\n{'='*80}")
     print("DATASET SUMMARY")
     print("="*80)
@@ -299,9 +359,9 @@ def load_era5_for_storms(storm_ids: List[str], df: pd.DataFrame, ibtracs_loader:
     Returns:
         Tuple of (era5_loader, era5_datasets dict)
     """
-    print("\n" + "="*80)
-    print("LOADING ERA5 REANALYSIS DATA FROM DAILY FILES")
-    print("="*80)
+    print("\n" + "="*80, flush=True)
+    print("LOADING ERA5 REANALYSIS DATA FROM DAILY FILES", flush=True)
+    print("="*80, flush=True)
     
     era5_loader = ERA5Loader()
     era5_datasets = {}
@@ -314,13 +374,13 @@ def load_era5_for_storms(storm_ids: List[str], df: pd.DataFrame, ibtracs_loader:
             era5_years.append(year)
     
     if not era5_years:
-        print(f"\n⚠️  WARNING: No ERA5 data directories found in {era5_loader.data_dir}")
+        print(f"\n[WARNING] No ERA5 data directories found in {era5_loader.data_dir}")
         print("  Expected directories like: ERA5_2018_26data, ERA5_2019_26data, etc.")
         print("  Continuing without ERA5 data - will skip storms without ERA5 data.")
         return era5_loader, {}
     
-    print(f"Found ERA5 data for years: {era5_years}")
-    print(f"Loading ERA5 data for {len(storm_ids)} storms...")
+    print(f"Found ERA5 data for years: {era5_years}", flush=True)
+    print(f"Loading ERA5 data for {len(storm_ids)} storms...", flush=True)
     
     loaded_count = 0
     for idx, storm_id in enumerate(storm_ids):
@@ -349,16 +409,16 @@ def load_era5_for_storms(storm_ids: List[str], df: pd.DataFrame, ibtracs_loader:
                 era5_datasets[storm_id] = era5_ds
                 loaded_count += 1
                 if loaded_count % 10 == 0:
-                    print(f"  Loaded ERA5 for {loaded_count}/{len(storm_ids)} storms...")
+                    print(f"  Loaded ERA5 for {loaded_count}/{len(storm_ids)} storms...", flush=True)
         
         except Exception as e:
-            print(f"  ✗ Failed to load ERA5 for {storm_id}: {e}")
+            print(f"  [ERROR] Failed to load ERA5 for {storm_id}: {e}", flush=True)
             continue
     
-    print(f"\n✓ Successfully loaded ERA5 data for {loaded_count}/{len(storm_ids)} storms")
+    print(f"\n[OK] Successfully loaded ERA5 data for {loaded_count}/{len(storm_ids)} storms", flush=True)
     
     if loaded_count == 0:
-        print("\n⚠️  WARNING: No ERA5 data could be loaded for any storms.")
+        print("\n[WARNING] No ERA5 data could be loaded for any storms.")
         print("  Continuing without ERA5 data - will skip storms without ERA5 data.")
         print("  Training will proceed with available data only.")
     
@@ -425,13 +485,13 @@ def check_all_era5_data_exists(
     
     if verbose:
         if existing_years:
-            print(f"\n✓ Found ERA5 directories for years: {existing_years}")
+            print(f"\n[OK] Found ERA5 directories for years: {existing_years}")
         if results['missing_directories']:
-            print(f"✗ Missing ERA5 directories: {results['missing_directories']}")
+            print(f"[ERROR] Missing ERA5 directories: {results['missing_directories']}")
     
     if not existing_years:
         if verbose:
-            print("\n❌ No ERA5 data directories found. Cannot check individual files.")
+            print("\n[ERROR] No ERA5 data directories found. Cannot check individual files.")
         return results
     
     # Check files for each storm
@@ -476,7 +536,7 @@ def check_all_era5_data_exists(
                 results['all_exist'] = False
                 
                 if verbose:
-                    print(f"  ✗ {storm_id}: Missing {len(missing_files)} files")
+                    print(f"  [ERROR] {storm_id}: Missing {len(missing_files)} files")
                     if len(missing_files) <= 5:
                         for f in missing_files:
                             print(f"      - {f}")
@@ -488,7 +548,7 @@ def check_all_era5_data_exists(
         
         except Exception as e:
             if verbose:
-                print(f"  ✗ Error checking {storm_id}: {e}")
+                print(f"  [ERROR] Error checking {storm_id}: {e}")
             continue
     
     # Print summary
@@ -507,9 +567,9 @@ def check_all_era5_data_exists(
                 print(f"  - {dir_name}")
         
         if results['all_exist']:
-            print("\n✓ All required ERA5 data files exist!")
+            print("\n[OK] All required ERA5 data files exist!")
         else:
-            print("\n✗ Some ERA5 data files are missing.")
+            print("\n[ERROR] Some ERA5 data files are missing.")
             if results['storms_with_missing_data'] > 0:
                 print(f"\nStorms with missing data (organized by typhoon ID):")
                 shown = 0
@@ -528,47 +588,70 @@ def check_all_era5_data_exists(
 def main():
     """Main function to generate dataset with temporal split"""
     
-    print("="*80)
-    print("GENERATING TYPHOON DATASET WITH TEMPORAL SPLIT BY YEAR")
-    print("="*80)
+    # Force unbuffered output
+    import sys
+    sys.stdout.reconfigure(line_buffering=True) if hasattr(sys.stdout, 'reconfigure') else None
     
-    # Configuration
+    print("="*80, flush=True)
+    print("GENERATING TYPHOON DATASET WITH TEMPORAL SPLIT BY YEAR", flush=True)
+    print("="*80, flush=True)
+    
+    # Configuration - FULL DATASET (2018-2021)
     START_YEAR = 2018
-    END_YEAR = 2021
-    PAST_TIMESTEPS = 8     # 8 past timesteps (8 hours at 1-hour intervals)
-    FUTURE_TIMESTEPS = 12  # 12 future timesteps (12 hours at 1-hour intervals)
-    STRIDE = None          # None = non-overlapping windows (stride = PAST_TIMESTEPS)
+    END_YEAR = 2021  # Full dataset
+    PAST_TIMESTEPS = 8     # 8 past timesteps (48 hours at 6-hour intervals)
+    FUTURE_TIMESTEPS = 12  # 12 future timesteps (72 hours at 6-hour intervals)
+    STRIDE = 4             # Stride of 4 (24-hour overlap between samples)
+    TEMPORAL_RESOLUTION = 6  # 6-hour intervals (MATCHING ERA5 temporal resolution!)
+    SKIP_EARLY_TIMESTEPS = 8  # Skip first 8 timesteps to ensure ERA5 history exists
     
-    # Split configuration (use interpolated tracks: 2018-2021)
+    # Split configuration - FULL DATASET
     TRAIN_YEARS = [2018, 2019]  # Training: 2018-2019
-    VAL_YEARS = [2020]          # Validation: 2020
-    TEST_YEARS = [2021]         # Test: 2021
+    VAL_YEARS = [2020]           # Validation: 2020
+    TEST_YEARS = [2021]          # Test: 2021
     
-    # Use absolute paths
+    # Use absolute paths - OUTPUT TO D:\ for faster disk I/O
     SCRIPT_DIR = Path(__file__).parent
-    OUTPUT_DIR = SCRIPT_DIR / "processed_temporal_split"
+    OUTPUT_DIR = Path("D:/typhoon_data_2018_2021_full")  # Full dataset output
     
-    print(f"\nConfiguration:")
-    print(f"  Year range: {START_YEAR}-{END_YEAR}")
-    print(f"  Past timesteps: {PAST_TIMESTEPS}")
-    print(f"  Future timesteps: {FUTURE_TIMESTEPS}")
-    print(f"  Window stride: {'non-overlapping' if STRIDE is None else STRIDE}")
-    print(f"  Train years: {TRAIN_YEARS}")
-    print(f"  Val years: {VAL_YEARS}")
-    print(f"  Test years: {TEST_YEARS}")
-    print(f"  Output directory: {OUTPUT_DIR}")
+    print(f"\nConfiguration (LT3P-aligned):", flush=True)
+    print(f"  Year range: {START_YEAR}-{END_YEAR}", flush=True)
+    print(f"  Temporal resolution: {TEMPORAL_RESOLUTION}-hour intervals", flush=True)
+    print(f"  Past timesteps: {PAST_TIMESTEPS} ({PAST_TIMESTEPS * TEMPORAL_RESOLUTION} hours)", flush=True)
+    print(f"  Future timesteps: {FUTURE_TIMESTEPS} ({FUTURE_TIMESTEPS * TEMPORAL_RESOLUTION} hours)", flush=True)
+    print(f"  Window stride: {STRIDE if STRIDE else 'non-overlapping'}", flush=True)
+    print(f"  Train years: {TRAIN_YEARS}", flush=True)
+    print(f"  Val years: {VAL_YEARS}", flush=True)
+    print(f"  Test years: {TEST_YEARS}", flush=True)
+    print(f"  Output directory: {OUTPUT_DIR}", flush=True)
     
     # Initialize loader with interpolated tracks
     ibtracs_loader = IBTrACSLoader(
         data_dir=str(SCRIPT_DIR / "raw")
     )
     
-    # Load interpolated IBTrACS data
-    interpolated_file = SCRIPT_DIR / "raw" / "interpolated_typhoon_tracks_2018_2021.csv"
-    if interpolated_file.exists():
-        print(f"Loading interpolated tracks from {interpolated_file}")
+    # Load interpolated IBTrACS data (6-hour intervals matching ERA5 temporal resolution)
+    interpolated_file_6h = SCRIPT_DIR / "raw" / "interpolated_typhoon_tracks_2018_2021_6h.csv"
+    
+    if interpolated_file_6h.exists():
+        interpolated_file = interpolated_file_6h
+        print(f"Using 6-hour interval data (matching ERA5 temporal resolution!)", flush=True)
+        # Rename columns to match expected format
+        df_raw = pd.read_csv(interpolated_file)
+        if 'typhoon_id' in df_raw.columns:
+            df_raw = df_raw.rename(columns={
+                'typhoon_id': 'SID',
+                'lat': 'LAT',
+                'lon': 'LON',
+                'wind': 'USA_WIND',
+                'pressure': 'USA_PRES'
+            })
+            temp_file = SCRIPT_DIR / "raw" / "temp_renamed_6h.csv"
+            df_raw.to_csv(temp_file, index=False)
+            interpolated_file = temp_file
+        print(f"Loading interpolated tracks from {interpolated_file}", flush=True)
         df = pd.read_csv(interpolated_file, low_memory=False)
-        print(f"✓ Loaded {len(df)} interpolated records")
+        print(f"[OK] Loaded {len(df)} interpolated records", flush=True)
         
         # Map column names to match IBTrACS format
         if 'typhoon_id' in df.columns:
@@ -586,7 +669,7 @@ def main():
             df['WMO_PRES'] = df['pressure']
             df['USA_PRES'] = df['pressure']
         
-        print(f"  Unique storms: {df['SID'].nunique()}")
+        print(f"  Unique storms: {df['SID'].nunique()}", flush=True)
     else:
         print(f"Interpolated file not found, using standard IBTrACS data")
         df = ibtracs_loader.load_ibtracs()
@@ -600,12 +683,35 @@ def main():
         min_duration_hours=48  # At least 48 hours
     )
     
-    print(f"\n✓ Found {len(storm_ids)} strong typhoons ({START_YEAR}-{END_YEAR})")
+    print(f"\n[OK] Found {len(storm_ids)} strong typhoons ({START_YEAR}-{END_YEAR})", flush=True)
     
     # Load ERA5 data for storms (if available)
-    era5_loader, era5_datasets = load_era5_for_storms(storm_ids, df, ibtracs_loader)
+    print(f"\nNote: 2 storms have missing ERA5 files (will be skipped)", flush=True)
+    print(f"  Missing: era5_pl_20181106.nc, era5_pl_20210904.nc", flush=True)
+    print(f"  Continuing with {len(storm_ids) - 2} storms that have complete data...\n", flush=True)
+    
+    # Use on-demand loading to save memory (don't load all datasets at once)
+    print("[INFO] Using on-demand ERA5 loading to reduce memory usage...", flush=True)
+    era5_loader = ERA5Loader()
+    
+    # Check if ERA5 directories exist
+    era5_years = []
+    for year in [2018, 2019, 2020, 2021]:
+        year_dir = era5_loader.data_dir / f"ERA5_{year}_26data"
+        if year_dir.exists():
+            era5_years.append(year)
+    
+    if not era5_years:
+        print(f"\n[WARNING] No ERA5 data directories found!", flush=True)
+        print("  Continuing without ERA5 data - will skip storms without ERA5 data.", flush=True)
+        era5_loader = None
+        era5_datasets = {}
+    else:
+        print(f"[OK] Found ERA5 data for years: {era5_years}", flush=True)
+        era5_datasets = {}  # Empty - will load on-demand
     
     # Generate samples organized by year using systematic sliding windows
+    # Use on-demand ERA5 loading to prevent memory issues
     samples_by_year, samples_by_storm = generate_samples_by_storm(
         ibtracs_loader=ibtracs_loader,
         df=df,
@@ -614,13 +720,15 @@ def main():
         future_timesteps=FUTURE_TIMESTEPS,
         stride=STRIDE,
         era5_loader=era5_loader,
-        era5_datasets=era5_datasets
+        era5_datasets=era5_datasets,
+        load_era5_on_demand=True,  # Load ERA5 on-demand to save memory
+        skip_early_timesteps=SKIP_EARLY_TIMESTEPS  # Skip early timesteps to ensure ERA5 coverage
     )
     
     # Check if any samples were generated
     total_samples = sum(len(v) for v in samples_by_year.values())
     if total_samples == 0:
-        print(f"\n⚠️  WARNING: No samples were generated (no ERA5 data available for any storms)")
+        print(f"\n[WARNING] No samples were generated (no ERA5 data available for any storms)")
         print(f"  Continuing anyway - training will proceed with available data only.")
         print(f"  Note: Training may not be possible without samples.")
     
@@ -635,7 +743,7 @@ def main():
     )
     
     print(f"\n{'='*80}")
-    print("✓ DATASET GENERATION COMPLETE!")
+    print("[OK] DATASET GENERATION COMPLETE!")
     print("="*80)
     print(f"\nYou can now train your model using:")
     print(f"  data_dir='{OUTPUT_DIR}'")
@@ -646,9 +754,9 @@ def main():
     print(f"\nThis ensures no typhoon appears in both training and test sets!")
     
     if era5_datasets:
-        print(f"\n✓ Using ERA5 reanalysis data for {len(era5_datasets)} storms")
+        print(f"\n[OK] Using ERA5 reanalysis data for {len(era5_datasets)} storms")
     else:
-        print(f"\n⚠️  WARNING: No ERA5 datasets available")
+        print(f"\n[WARNING] No ERA5 datasets available")
         print(f"  Training will proceed with available data only.")
         print(f"  Generated {sum(len(v) for v in samples_by_year.values())} samples from IBTrACS data.")
 
@@ -682,7 +790,7 @@ if __name__ == "__main__":
         if interpolated_file.exists():
             print(f"Loading interpolated tracks from {interpolated_file}")
             df = pd.read_csv(interpolated_file, low_memory=False)
-            print(f"✓ Loaded {len(df)} interpolated records")
+            print(f"[OK] Loaded {len(df)} interpolated records")
             
             # Map column names
             if 'typhoon_id' in df.columns:
@@ -724,10 +832,10 @@ if __name__ == "__main__":
         
         # Exit with appropriate code
         if results['all_exist']:
-            print("\n✓ All ERA5 data is available. Ready to generate dataset.")
+            print("\n[OK] All ERA5 data is available. Ready to generate dataset.")
             exit(0)
         else:
-            print("\n✗ Some ERA5 data is missing. Please download missing files before generating dataset.")
+            print("\n[ERROR] Some ERA5 data is missing. Please download missing files before generating dataset.")
             exit(1)
     else:
         # Run normal dataset generation

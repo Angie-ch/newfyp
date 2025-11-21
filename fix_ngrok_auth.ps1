@@ -42,3 +42,13 @@ Write-Host ""
 Write-Host "Then sign in on both Windows and Mac with the same account." -ForegroundColor Cyan
 Write-Host ""
 
+
+
+
+
+
+
+
+
+
+

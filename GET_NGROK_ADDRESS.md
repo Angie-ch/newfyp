@@ -44,3 +44,13 @@ For permanent access that doesn't change, use Tailscale instead.
 
 See `CONNECTION_GUIDE.md` for Tailscale setup.
 
+
+
+
+
+
+
+
+
+
+

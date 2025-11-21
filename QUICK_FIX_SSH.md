@@ -77,3 +77,13 @@ ssh fyp@<tailscale-ip>
 
 **Next Step:** Choose ngrok (quick) or Tailscale (permanent) above.
 
+
+
+
+
+
+
+
+
+
+

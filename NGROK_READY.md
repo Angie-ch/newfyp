@@ -85,3 +85,13 @@ If you want a permanent IP that doesn't change:
 
 Tailscale is more reliable and doesn't require keeping a window open!
 
+
+
+
+
+
+
+
+
+
+
