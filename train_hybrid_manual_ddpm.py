@@ -1,23 +1,35 @@
 """
-Manual DDPM Training for Hybrid Typhoon Predictor
-Video-to-Video Diffusion Implementation
+Manual DDPM training for the hybrid typhoon predictor.
+
+This version:
+1. Uses the Imagen-style VideoUNet3D from `custom_video_diffusion.py`
+2. Adds the LT3P multi-task heads (structure, track, intensity, pressure)
+3. Extends the dataset to emit multi-modal targets (track/intensity/pressure)
+4. Introduces staged training: deterministic → diffusion → joint
+5. Logs LT3P + diffusion metrics for regression tracking
 """
 
+import json
+import math
+from collections import defaultdict
+from pathlib import Path
+from typing import Dict, List, Optional
+
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-import numpy as np
-from pathlib import Path
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
-import json
-import math
 
-# Import our hybrid model (we'll use the ConvLSTM + Unet3D parts)
-from hybrid_typhoon_predictor_v3 import (
-    ConvLSTM, TrackPredictor
+from custom_video_diffusion import VideoUNet3D
+from hybrid_typhoon_predictor_v3 import ConvLSTM
+from models.diffusion.prediction_heads import (
+    IntensityHead,
+    PressureHead,
+    StructureHead,
+    TrackHead,
 )
-from imagen_pytorch import Unet3D
 
 
 # ============================================================================
@@ -120,7 +132,7 @@ class GaussianDiffusion:
         Training loss: predict noise at timestep t
         
         Args:
-            unet: Unet3D model
+            unet: VideoUNet3D model
             x_start: (B, C, T, H, W) - clean future frames
             t: (B,) - timesteps
             cond_video: (B, C_cond, T, H, W) - condition from ConvLSTM
@@ -137,11 +149,7 @@ class GaussianDiffusion:
         
         # Predict noise using Unet3D
         # Unet3D expects: (x, time, cond_video_frames) for 5D video tensors
-        predicted_noise = unet(
-            x_noisy,
-            time=t,
-            cond_video_frames=cond_video
-        )
+        predicted_noise = unet(x_noisy, t, cond_video)
         
         # Compute MSE loss between predicted and true noise
         loss = F.mse_loss(predicted_noise, noise)
@@ -163,7 +171,7 @@ class GaussianDiffusion:
             x_{t-1}: (B, C, T, H, W)
         """
         # Predict noise
-        predicted_noise = unet(x, time=t, cond_video_frames=cond_video)
+        predicted_noise = unet(x, t, cond_video)
         
         # Extract coefficients
         alpha = self._extract(self.alphas, t, x.shape)
@@ -219,350 +227,480 @@ class GaussianDiffusion:
 
 
 # ============================================================================
-# Hybrid Model with Manual DDPM
+# Dataset and Training
 # ============================================================================
 
 class HybridTyphoonPredictor_ManualDDPM(nn.Module):
     """
-    Hybrid model: ConvLSTM encoder + Manual DDPM decoder + Track predictor
+    ConvLSTM encoder + Imagen-style VideoUNet3D decoder + LT3P heads
     """
-    def __init__(self, input_channels=24, hidden_channels=64, output_channels=24,
-                 past_timesteps=8, future_timesteps=12, image_size=(64, 64),
-                 diffusion_timesteps=250):
+
+    def __init__(
+        self,
+        input_channels: int = 24,
+        hidden_channels: int = 64,
+        physics_channels: int = 128,
+        output_channels: int = 24,
+        past_timesteps: int = 8,
+        future_timesteps: int = 12,
+        image_size: tuple = (64, 64),
+        diffusion_timesteps: int = 250,
+        unet_dim: int = 32,
+        unet_dim_mults: tuple = (1, 2, 4, 8),
+        unet_num_resnet_blocks: int = 3,
+    ):
         super().__init__()
+
         self.past_timesteps = past_timesteps
         self.future_timesteps = future_timesteps
         self.image_size = image_size
-        self.hidden_channels = hidden_channels
         self.output_channels = output_channels
-        
-        # ConvLSTM Encoder (from Model A)
+        self.physics_channels = physics_channels
+
+        # ConvLSTM encoder (temporal prior)
         self.convlstm_encoder = ConvLSTM(
             input_channels=input_channels,
             hidden_channels=[hidden_channels, hidden_channels],
             kernel_size=3,
             num_layers=2,
-            batch_first=True
+            batch_first=True,
         )
-        
-        # Condition projection: ConvLSTM features → Unet3D condition
-        # Input: (B, C_hidden, H, W) → expand to (B, C_hidden, T_future, H, W)
-        # Output: (B, C_out, T_future, H, W)
-        self.cond_proj = nn.Conv3d(hidden_channels, output_channels, kernel_size=1)
-        
-        # Track Predictor (MLP)
-        self.track_predictor = TrackPredictor(
-            hidden_dim=hidden_channels * image_size[0] * image_size[1],
-            output_frames=future_timesteps
+
+        # Project ConvLSTM features into physics-aware channels
+        self.cond_proj = nn.Sequential(
+            nn.Conv2d(hidden_channels, physics_channels, kernel_size=3, padding=1),
+            nn.GroupNorm(8, physics_channels),
+            nn.SiLU(),
+            nn.Conv2d(physics_channels, physics_channels, kernel_size=1),
+            nn.SiLU(),
         )
-        
-        # Unet3D for diffusion (Model B)
-        print("[INFO] Creating Unet3D for manual DDPM...")
-        self.video_unet = Unet3D(
-            dim=32,  # Base dimension
-            dim_mults=(1, 2, 4, 8),
-            num_resnet_blocks=3,
-            channels=output_channels,  # ERA5 channels
-            # For video conditioning, don't use cond_video_frames directly in forward()
-            # IMPORTANT: Disable ALL attention to avoid 5D/4D issues
-            layer_attns=(False, False, False, False),
-            use_linear_attn=False,  # Disable linear attention too
-            memory_efficient=True,
-            init_conv_to_final_conv_residual=True,
+
+        # LT3P-style multi-task heads
+        self.structure_head = StructureHead(physics_channels, output_channels)
+        self.track_head = TrackHead(physics_channels, output_frames=future_timesteps)
+        self.intensity_head = IntensityHead(physics_channels, output_frames=future_timesteps)
+        self.pressure_head = PressureHead(physics_channels, output_frames=future_timesteps)
+
+        # Imagen-style VideoUNet3D (fully 5D)
+        self.video_unet = VideoUNet3D(
+            in_channels=output_channels,
+            out_channels=output_channels,
+            cond_channels=physics_channels,
+            base_channels=unet_dim,
+            channel_mults=unet_dim_mults,
+            num_res_blocks=unet_num_resnet_blocks,
         )
-        print("[OK] Unet3D initialized (NO ATTENTION)")
-        
-        # Gaussian Diffusion process
+
+        # Manual diffusion process
         self.diffusion = GaussianDiffusion(
             timesteps=diffusion_timesteps,
-            beta_schedule='linear'
+            beta_schedule='linear',
         )
-        print(f"[OK] Gaussian Diffusion initialized with {diffusion_timesteps} timesteps")
-    
-    def encode_past_frames(self, past_frames):
-        """
-        Encode past frames using ConvLSTM
-        
-        Args:
-            past_frames: (B, T_past, C_in, H, W)
-        
-        Returns:
-            convlstm_features: (B, C_hidden, H, W)
-            cond_video: (B, C_out, T_future, H, W)
-            predicted_track: (B, T_future, 2)
-        """
-        B, T_past, C_in, H, W = past_frames.shape
-        
-        # 1. ConvLSTM Encoder
+
+        self.current_stage = 'joint'
+
+    @staticmethod
+    def _set_requires_grad(module: Optional[nn.Module], flag: bool):
+        if module is None:
+            return
+        for param in module.parameters():
+            param.requires_grad = flag
+
+    def configure_stage(self, stage_name: str):
+        stage = stage_name.lower()
+        if stage not in {'deterministic', 'diffusion', 'joint'}:
+            raise ValueError(f"Unknown stage: {stage_name}")
+
+        encoder_flag = stage in {'deterministic', 'joint'}
+        heads_flag = stage in {'deterministic', 'joint'}
+        diffusion_flag = stage in {'diffusion', 'joint'}
+
+        self._set_requires_grad(self.convlstm_encoder, encoder_flag)
+        self._set_requires_grad(self.cond_proj, encoder_flag)
+        self._set_requires_grad(self.structure_head, heads_flag)
+        self._set_requires_grad(self.track_head, heads_flag)
+        self._set_requires_grad(self.intensity_head, heads_flag)
+        self._set_requires_grad(self.pressure_head, heads_flag)
+        self._set_requires_grad(self.video_unet, diffusion_flag)
+
+        self.current_stage = stage
+
+    def _encode_spatiotemporal(self, past_frames: torch.Tensor) -> torch.Tensor:
         _, last_state = self.convlstm_encoder(past_frames)
-        convlstm_features = last_state[-1][0]  # (B, C_hidden, H, W)
-        
-        # 2. Condition Projection
-        # Expand to (B, C_hidden, T_future, H, W)
-        cond_video_expanded = convlstm_features.unsqueeze(2).repeat(1, 1, self.future_timesteps, 1, 1)
-        # Project to (B, C_out, T_future, H, W)
-        cond_video = self.cond_proj(cond_video_expanded)
-        
-        # 3. Track Prediction
-        track_input = convlstm_features.reshape(B, -1)
-        predicted_track = self.track_predictor(track_input)
-        
-        return convlstm_features, cond_video, predicted_track
-    
-    def forward(self, past_frames, future_frames, track_future, t=None):
+        conv_features = last_state[-1][0]  # (B, hidden_channels, H, W)
+        return conv_features
+
+    def _build_cond_video(self, conv_features: torch.Tensor) -> torch.Tensor:
+        cond_spatial = self.cond_proj(conv_features)  # (B, physics_channels, H, W)
+        cond_video = cond_spatial.unsqueeze(2).repeat(1, 1, self.future_timesteps, 1, 1)
+        return cond_video
+
+    def forward(self, past_frames: torch.Tensor) -> Dict[str, torch.Tensor]:
         """
-        Training forward pass
-        
-        Args:
-            past_frames: (B, T_past, C, H, W)
-            future_frames: (B, T_future, C, H, W)
-            track_future: (B, T_future, 2)
-            t: (B,) - timesteps for diffusion (if None, randomly sampled)
-        
-        Returns:
-            diffusion_loss: scalar
-            track_loss: scalar
-            predicted_track: (B, T_future, 2)
+        Returns multi-task predictions along with the conditioning video tensor.
         """
-        B = past_frames.shape[0]
-        device = past_frames.device
-        
-        # Encode past frames
-        _, cond_video, predicted_track = self.encode_past_frames(past_frames)
-        
-        # Track loss
-        track_loss = F.mse_loss(predicted_track, track_future)
-        
-        # Diffusion loss
-        # Convert future_frames from (B, T, C, H, W) to (B, C, T, H, W)
-        future_frames_perm = future_frames.permute(0, 2, 1, 3, 4)
-        
-        # Sample timesteps if not provided
-        if t is None:
-            t = torch.randint(0, self.diffusion.timesteps, (B,), device=device).long()
-        
-        # Compute diffusion loss using manual DDPM
-        diffusion_loss = self.diffusion.p_losses(
-            self.video_unet,
-            future_frames_perm,
-            t,
-            cond_video
-        )
-        
-        return diffusion_loss, track_loss, predicted_track
-    
+        conv_features = self._encode_spatiotemporal(past_frames)
+        cond_video = self._build_cond_video(conv_features)
+
+        structure_pred = self.structure_head(cond_video)  # (B, T, C, H, W)
+        track_pred = self.track_head(cond_video)          # (B, T, 2)
+        intensity_pred = self.intensity_head(cond_video)  # (B, T)
+        pressure_pred = self.pressure_head(cond_video)    # (B, T)
+
+        return {
+            'cond_video': cond_video,
+            'structure_pred': structure_pred,
+            'track_pred': track_pred,
+            'intensity_pred': intensity_pred,
+            'pressure_pred': pressure_pred,
+        }
+
     @torch.no_grad()
-    def sample(self, past_frames):
-        """
-        Inference: generate future frames
-        
-        Args:
-            past_frames: (B, T_past, C, H, W)
-        
-        Returns:
-            sampled_frames: (B, T_future, C, H, W)
-            predicted_track: (B, T_future, 2)
-        """
-        B = past_frames.shape[0]
-        device = past_frames.device
-        
-        # Encode past frames
-        _, cond_video, predicted_track = self.encode_past_frames(past_frames)
-        
-        # Sample future frames using DDPM
-        shape = (B, self.output_channels, self.future_timesteps, *self.image_size)
-        sampled_frames_perm = self.diffusion.p_sample_loop(
-            self.video_unet,
-            shape,
-            cond_video,
-            device
-        )
-        
-        # Convert back to (B, T, C, H, W)
-        sampled_frames = sampled_frames_perm.permute(0, 2, 1, 3, 4)
-        
-        return sampled_frames, predicted_track
+    def sample(self, past_frames: torch.Tensor, device: Optional[torch.device] = None):
+        device = device or past_frames.device
+        preds = self.forward(past_frames)
+        cond_video = preds['cond_video']
 
+        shape = (past_frames.shape[0], self.output_channels, self.future_timesteps, *self.image_size)
+        sampled = self.diffusion.p_sample_loop(self.video_unet, shape, cond_video, device)
+        sampled = sampled.permute(0, 2, 1, 3, 4)
 
-# ============================================================================
-# Dataset and Training
-# ============================================================================
+        return {
+            'future_frames': sampled,
+            'track_pred': preds['track_pred'],
+            'intensity_pred': preds['intensity_pred'],
+            'pressure_pred': preds['pressure_pred'],
+        }
+
 
 class TyphoonDataset(Dataset):
-    def __init__(self, data_dir, normalize=True):
+    """
+    Loads multi-modal ERA5 + IBTrACS samples from NPZ files.
+
+    Returned dictionary keys:
+        - past_frames:        (T_past, C, H, W)
+        - future_frames:      (T_future, C, H, W)
+        - track_past:         (T_past, 2)
+        - track_future:       (T_future, 2)
+        - intensity_past:     (T_past,)
+        - intensity_future:   (T_future,)
+        - pressure_past:      (T_past,)
+        - pressure_future:    (T_future,)
+        - storm_id:           string identifier
+    """
+
+    def __init__(self, data_dir: Path, normalize: bool = True):
         self.data_dir = Path(data_dir)
-        self.files = sorted(list(self.data_dir.glob("*.npz")))
+        self.files = sorted(self.data_dir.glob("*.npz"))
         self.normalize = normalize
-        
-        if len(self.files) == 0:
+
+        if not self.files:
             raise ValueError(f"No .npz files found in {data_dir}")
-        
+
         print(f"[INFO] Found {len(self.files)} samples in {data_dir}")
-    
+
     def __len__(self):
         return len(self.files)
-    
-    def __getitem__(self, idx):
-        data = np.load(self.files[idx])
-        
-        past_frames = torch.from_numpy(data['past_frames']).float()
-        future_frames = torch.from_numpy(data['future_frames']).float()
-        track_past = torch.from_numpy(data['track_past']).float()
-        track_future = torch.from_numpy(data['track_future']).float()
-        
-        # Normalize to [-1, 1] for diffusion
+
+    def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
+        npz_path = self.files[idx]
+        with np.load(npz_path) as data:
+            past_frames = data['past_frames'].astype(np.float32)
+            future_frames = data['future_frames'].astype(np.float32)
+            storm_id = str(data['storm_id']) if 'storm_id' in data else npz_path.stem
+
+            T_past = past_frames.shape[0]
+            T_future = future_frames.shape[0]
+
+            def _get_array(key: str, shape, dtype=np.float32):
+                if key in data:
+                    return data[key].astype(dtype)
+                return np.zeros(shape, dtype=dtype)
+
+            track_past = _get_array('track_past', (T_past, 2))
+            track_future = _get_array('track_future', (T_future, 2))
+            intensity_past = _get_array('past_intensity', (T_past,))
+            intensity_future = _get_array('future_intensity', (T_future,))
+            pressure_past = _get_array('past_pressure', (T_past,))
+            pressure_future = _get_array('future_pressure', (T_future,))
+
+        sample = {
+            'past_frames': torch.from_numpy(past_frames),
+            'future_frames': torch.from_numpy(future_frames),
+            'track_past': torch.from_numpy(track_past),
+            'track_future': torch.from_numpy(track_future),
+            'intensity_past': torch.from_numpy(intensity_past),
+            'intensity_future': torch.from_numpy(intensity_future),
+            'pressure_past': torch.from_numpy(pressure_past),
+            'pressure_future': torch.from_numpy(pressure_future),
+            'storm_id': storm_id,
+        }
+
+        # Placeholder for future normalization hooks
         if self.normalize:
-            # ERA5 data ranges (approximate)
-            # We'll use simple standardization: (x - mean) / std
-            # For now, just scale to [-1, 1] assuming data is already somewhat normalized
-            pass  # Data is already normalized in preprocessing
-        
-        return past_frames, future_frames, track_past, track_future
+            pass
+
+        return sample
 
 
 def train_manual_ddpm(
-    model,
-    train_loader,
-    val_loader,
-    device,
-    num_epochs=50,
-    lr=1e-4,
-    save_dir='checkpoints_manual_ddpm',
-    lambda_track=1.0,
-    lambda_diffusion=1.0
+    model: HybridTyphoonPredictor_ManualDDPM,
+    train_loader: DataLoader,
+    val_loader: DataLoader,
+    device: torch.device,
+    lr: float = 1e-4,
+    save_dir: str = 'checkpoints_manual_ddpm',
+    deterministic_epochs: int = 10,
+    diffusion_epochs: int = 20,
+    joint_epochs: int = 20,
+    lr_diffusion: Optional[float] = None,
+    lr_joint: Optional[float] = None,
 ):
     """
-    Training loop for manual DDPM
+    Three-phase training loop.
     """
     save_dir = Path(save_dir)
     save_dir.mkdir(exist_ok=True)
-    
-    # Optimizers
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    
-    # Move diffusion schedule to device
+
     model.diffusion.to(device)
-    
-    # Training history
-    history = {
-        'train_diffusion_loss': [],
-        'train_track_loss': [],
-        'train_total_loss': [],
-        'val_diffusion_loss': [],
-        'val_track_loss': [],
-        'val_total_loss': []
-    }
-    
+
+    phases = [
+        {
+            'name': 'deterministic',
+            'epochs': deterministic_epochs,
+            'lambdas': {
+                'structure': 1.0,
+                'track': 1.0,
+                'intensity': 0.5,
+                'pressure': 0.5,
+                'diffusion': 0.0,
+            },
+            'lr': lr,
+        },
+        {
+            'name': 'diffusion',
+            'epochs': diffusion_epochs,
+            'lambdas': {
+                'structure': 0.0,
+                'track': 0.0,
+                'intensity': 0.0,
+                'pressure': 0.0,
+                'diffusion': 1.0,
+            },
+            'lr': lr_diffusion or lr,
+        },
+        {
+            'name': 'joint',
+            'epochs': joint_epochs,
+            'lambdas': {
+                'structure': 1.0,
+                'track': 1.0,
+                'intensity': 0.5,
+                'pressure': 0.5,
+                'diffusion': 1.0,
+            },
+            'lr': lr_joint or lr,
+        },
+    ]
+
+    history: Dict[str, Dict[str, Dict[str, List[float]]]] = {}
     best_val_loss = float('inf')
-    
-    print("\n" + "="*60)
-    print("STARTING MANUAL DDPM TRAINING")
-    print("="*60)
-    
-    for epoch in range(num_epochs):
-        # ==================== Training ====================
-        model.train()
-        train_diffusion_losses = []
-        train_track_losses = []
-        
-        pbar = tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs} [Train]')
-        for batch_idx, (past_frames, future_frames, track_past, track_future) in enumerate(pbar):
-            # Move to device
-            past_frames = past_frames.to(device)
-            future_frames = future_frames.to(device)
-            track_future = track_future.to(device)
-            
-            # Forward pass
-            diffusion_loss, track_loss, _ = model(
-                past_frames, future_frames, track_future
-            )
-            
-            # Total loss
-            total_loss = lambda_diffusion * diffusion_loss + lambda_track * track_loss
-            
-            # Backward pass
-            optimizer.zero_grad()
-            total_loss.backward()
-            
-            # Gradient clipping
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            
-            optimizer.step()
-            
-            # Log losses
-            train_diffusion_losses.append(diffusion_loss.item())
-            train_track_losses.append(track_loss.item())
-            
-            # Update progress bar
-            pbar.set_postfix({
-                'D_loss': f'{diffusion_loss.item():.4f}',
-                'T_loss': f'{track_loss.item():.4f}',
-                'Total': f'{total_loss.item():.4f}'
-            })
-        
-        # Average training losses
-        avg_train_diffusion = np.mean(train_diffusion_losses)
-        avg_train_track = np.mean(train_track_losses)
-        avg_train_total = avg_train_diffusion * lambda_diffusion + avg_train_track * lambda_track
-        
-        history['train_diffusion_loss'].append(avg_train_diffusion)
-        history['train_track_loss'].append(avg_train_track)
-        history['train_total_loss'].append(avg_train_total)
-        
-        # ==================== Validation ====================
-        model.eval()
-        val_diffusion_losses = []
-        val_track_losses = []
-        
-        with torch.no_grad():
-            for past_frames, future_frames, track_past, track_future in val_loader:
-                past_frames = past_frames.to(device)
-                future_frames = future_frames.to(device)
-                track_future = track_future.to(device)
-                
-                diffusion_loss, track_loss, _ = model(
-                    past_frames, future_frames, track_future
+
+    print("\n" + "=" * 60)
+    print("STARTING STAGED MANUAL DDPM TRAINING")
+    print("=" * 60)
+
+    for phase in phases:
+        stage_name = phase['name']
+        epochs = phase['epochs']
+        lambdas = phase['lambdas']
+        phase_lr = phase['lr']
+
+        if epochs <= 0:
+            continue
+
+        print(f"\n>>> Stage: {stage_name.upper()} ({epochs} epochs)")
+        model.configure_stage(stage_name)
+
+        params = [p for p in model.parameters() if p.requires_grad]
+        if not params:
+            print(f"[WARN] No trainable parameters for stage {stage_name}, skipping.")
+            continue
+
+        optimizer = torch.optim.Adam(params, lr=phase_lr)
+        history[stage_name] = {'train': defaultdict(list), 'val': defaultdict(list)}
+
+        for epoch in range(epochs):
+            model.train()
+            train_metrics = defaultdict(list)
+            pbar = tqdm(train_loader, desc=f"Stage {stage_name} | Train {epoch+1}/{epochs}")
+
+            for batch in pbar:
+                past_frames = batch['past_frames'].to(device)
+                future_frames = batch['future_frames'].to(device)
+                track_future = batch['track_future'].to(device)
+                intensity_future = batch['intensity_future'].to(device)
+                pressure_future = batch['pressure_future'].to(device)
+
+                preds = model(past_frames)
+                cond_video = preds['cond_video']
+                structure_pred = preds['structure_pred']
+                track_pred = preds['track_pred']
+                intensity_pred = preds['intensity_pred']
+                pressure_pred = preds['pressure_pred']
+
+                structure_loss = F.l1_loss(structure_pred, future_frames)
+                track_loss = F.mse_loss(track_pred, track_future)
+                intensity_loss = F.mse_loss(intensity_pred, intensity_future)
+                pressure_loss = F.mse_loss(pressure_pred, pressure_future)
+
+                if lambdas['diffusion'] > 0:
+                    B = past_frames.shape[0]
+                    t = torch.randint(0, model.diffusion.timesteps, (B,), device=device).long()
+                    future_perm = future_frames.permute(0, 2, 1, 3, 4)
+                    diffusion_loss = model.diffusion.p_losses(
+                        model.video_unet,
+                        future_perm,
+                        t,
+                        cond_video,
+                    )
+                else:
+                    diffusion_loss = torch.zeros(1, device=device)
+
+                total_loss = (
+                    lambdas['structure'] * structure_loss
+                    + lambdas['track'] * track_loss
+                    + lambdas['intensity'] * intensity_loss
+                    + lambdas['pressure'] * pressure_loss
+                    + lambdas['diffusion'] * diffusion_loss
                 )
-                
-                val_diffusion_losses.append(diffusion_loss.item())
-                val_track_losses.append(track_loss.item())
-        
-        # Average validation losses
-        avg_val_diffusion = np.mean(val_diffusion_losses)
-        avg_val_track = np.mean(val_track_losses)
-        avg_val_total = avg_val_diffusion * lambda_diffusion + avg_val_track * lambda_track
-        
-        history['val_diffusion_loss'].append(avg_val_diffusion)
-        history['val_track_loss'].append(avg_val_track)
-        history['val_total_loss'].append(avg_val_total)
-        
-        # Print epoch summary
-        print(f"\nEpoch {epoch+1}/{num_epochs} Summary:")
-        print(f"  Train - Diffusion: {avg_train_diffusion:.4f}, Track: {avg_train_track:.4f}, Total: {avg_train_total:.4f}")
-        print(f"  Val   - Diffusion: {avg_val_diffusion:.4f}, Track: {avg_val_track:.4f}, Total: {avg_val_total:.4f}")
-        
-        # Save checkpoint
-        if avg_val_total < best_val_loss:
-            best_val_loss = avg_val_total
-            checkpoint_path = save_dir / 'best_model.pth'
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_loss': best_val_loss,
-                'history': history
-            }, checkpoint_path)
-            print(f"  [OK] Saved best model (val_loss={best_val_loss:.4f})")
-        
-        # Save history
-        with open(save_dir / 'training_history.json', 'w') as f:
-            json.dump(history, f, indent=2)
-    
-    print("\n" + "="*60)
+
+                optimizer.zero_grad()
+                total_loss.backward()
+                torch.nn.utils.clip_grad_norm_(params, max_norm=1.0)
+                optimizer.step()
+
+                metrics = {
+                    'structure_loss': structure_loss.item(),
+                    'track_loss': track_loss.item(),
+                    'track_mae': F.l1_loss(track_pred, track_future).item(),
+                    'intensity_loss': intensity_loss.item(),
+                    'intensity_mae': F.l1_loss(intensity_pred, intensity_future).item(),
+                    'pressure_loss': pressure_loss.item(),
+                    'pressure_mae': F.l1_loss(pressure_pred, pressure_future).item(),
+                    'diffusion_loss': diffusion_loss.item(),
+                    'total_loss': total_loss.item(),
+                }
+
+                for key, value in metrics.items():
+                    train_metrics[key].append(value)
+
+                pbar.set_postfix({
+                    'tot': f"{metrics['total_loss']:.4f}",
+                    'diff': f"{metrics['diffusion_loss']:.4f}",
+                    'trk': f"{metrics['track_mae']:.4f}",
+                    'int': f"{metrics['intensity_mae']:.4f}",
+                })
+
+            avg_train = {k: float(np.mean(v)) for k, v in train_metrics.items()}
+            for key, value in avg_train.items():
+                history[stage_name]['train'][key].append(value)
+
+            # Validation
+            model.eval()
+            val_metrics = defaultdict(list)
+            with torch.no_grad():
+                for batch in val_loader:
+                    past_frames = batch['past_frames'].to(device)
+                    future_frames = batch['future_frames'].to(device)
+                    track_future = batch['track_future'].to(device)
+                    intensity_future = batch['intensity_future'].to(device)
+                    pressure_future = batch['pressure_future'].to(device)
+
+                    preds = model(past_frames)
+                    cond_video = preds['cond_video']
+                    structure_pred = preds['structure_pred']
+                    track_pred = preds['track_pred']
+                    intensity_pred = preds['intensity_pred']
+                    pressure_pred = preds['pressure_pred']
+
+                    structure_loss = F.l1_loss(structure_pred, future_frames)
+                    track_loss = F.mse_loss(track_pred, track_future)
+                    intensity_loss = F.mse_loss(intensity_pred, intensity_future)
+                    pressure_loss = F.mse_loss(pressure_pred, pressure_future)
+
+                    if lambdas['diffusion'] > 0:
+                        B = past_frames.shape[0]
+                        t = torch.randint(0, model.diffusion.timesteps, (B,), device=device).long()
+                        future_perm = future_frames.permute(0, 2, 1, 3, 4)
+                        diffusion_loss = model.diffusion.p_losses(
+                            model.video_unet,
+                            future_perm,
+                            t,
+                            cond_video,
+                        )
+                    else:
+                        diffusion_loss = torch.zeros(1, device=device)
+
+                    total_loss = (
+                        lambdas['structure'] * structure_loss
+                        + lambdas['track'] * track_loss
+                        + lambdas['intensity'] * intensity_loss
+                        + lambdas['pressure'] * pressure_loss
+                        + lambdas['diffusion'] * diffusion_loss
+                    )
+
+                    metrics = {
+                        'structure_loss': structure_loss.item(),
+                        'track_loss': track_loss.item(),
+                        'track_mae': F.l1_loss(track_pred, track_future).item(),
+                        'intensity_loss': intensity_loss.item(),
+                        'intensity_mae': F.l1_loss(intensity_pred, intensity_future).item(),
+                        'pressure_loss': pressure_loss.item(),
+                        'pressure_mae': F.l1_loss(pressure_pred, pressure_future).item(),
+                        'diffusion_loss': diffusion_loss.item(),
+                        'total_loss': total_loss.item(),
+                    }
+                    for key, value in metrics.items():
+                        val_metrics[key].append(value)
+
+            avg_val = {k: float(np.mean(v)) for k, v in val_metrics.items()}
+            for key, value in avg_val.items():
+                history[stage_name]['val'][key].append(value)
+
+            print(
+                f"\nStage {stage_name} | Epoch {epoch+1}/{epochs} "
+                f"- Train Total: {avg_train['total_loss']:.4f}, "
+                f"Val Total: {avg_val['total_loss']:.4f}, "
+                f"Val Track MAE: {avg_val['track_mae']:.4f}, "
+                f"Val Int MAE: {avg_val['intensity_mae']:.4f}"
+            )
+
+            current_val_total = avg_val['total_loss']
+            if current_val_total < best_val_loss:
+                best_val_loss = current_val_total
+                checkpoint_path = save_dir / 'best_model.pth'
+                torch.save(
+                    {
+                        'stage': stage_name,
+                        'epoch': epoch,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'val_loss': best_val_loss,
+                        'history': history,
+                    },
+                    checkpoint_path,
+                )
+                print(f"  [OK] Saved best model (val_total={best_val_loss:.4f})")
+
+            with open(save_dir / 'staged_training_history.json', 'w') as f:
+                json.dump(history, f, indent=2)
+
+    print("\n" + "=" * 60)
     print("TRAINING COMPLETED!")
-    print(f"Best validation loss: {best_val_loss:.4f}")
-    print("="*60)
-    
+    print(f"Best validation total loss: {best_val_loss:.4f}")
+    print("=" * 60)
+
     return history
 
 
@@ -576,7 +714,7 @@ if __name__ == '__main__':
     print(f"[INFO] Using device: {DEVICE}")
     
     # Data directories
-    DATA_DIR = r'D:\typhoon_data_2018_2021_full'
+    DATA_DIR = Path('/Users/angiecheong/Desktop/fyp3/data/data/era5/typhoon_data_2018_2021_full')
     TRAIN_DIR = Path(DATA_DIR) / 'train' / 'cases'
     VAL_DIR = Path(DATA_DIR) / 'val' / 'cases'
     
@@ -611,13 +749,13 @@ if __name__ == '__main__':
     model = HybridTyphoonPredictor_ManualDDPM(
         input_channels=24,
         hidden_channels=64,
+        physics_channels=128,
         output_channels=24,
         past_timesteps=8,
         future_timesteps=12,
         image_size=(64, 64),
-        diffusion_timesteps=DIFFUSION_TIMESTEPS
-    )
-    model = model.to(DEVICE)
+        diffusion_timesteps=DIFFUSION_TIMESTEPS,
+    ).to(DEVICE)
     
     # Count parameters
     total_params = sum(p.numel() for p in model.parameters())
@@ -632,11 +770,11 @@ if __name__ == '__main__':
         train_loader=train_loader,
         val_loader=val_loader,
         device=DEVICE,
-        num_epochs=NUM_EPOCHS,
         lr=LEARNING_RATE,
         save_dir='checkpoints_manual_ddpm',
-        lambda_track=1.0,
-        lambda_diffusion=1.0
+        deterministic_epochs=10,
+        diffusion_epochs=20,
+        joint_epochs=20,
     )
     
     print("\n[SUCCESS] All done! Check 'checkpoints_manual_ddpm/' for results.")
