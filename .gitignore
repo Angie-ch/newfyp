@@ -199,3 +199,8 @@ wandb/
 # ====================
 mlruns/
 
+# ====================
+# Large Data Mirrors
+# ====================
+logs/
+data/processed_temporal_split/
