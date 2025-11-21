@@ -25,7 +25,7 @@ import logging
 import signal
 import sys
 
-from data.datasets.typhoon_dataset import TyphoonDataset
+from data.datasets import TyphoonDataset
 from torch.utils.data import DataLoader
 
 from models.autoencoder.joint_autoencoder import JointAutoencoder
@@ -265,9 +265,11 @@ def train_diffusion(config: dict, device: str, autoencoder_path: str = None):
         train_config = config['training']['diffusion'].copy()
         train_config['log_interval'] = config['training'].get('log_interval', 50)
         train_config['save_interval'] = config['training'].get('save_interval', 5)
+        epochs = config['training']['diffusion']['epochs']
     else:
         # Flat structure: use training config directly
         train_config = config['training'].copy()
+        epochs = config['training'].get('epochs', 100)
     
     # Create trainer
     trainer = JointDiffusionTrainer(
@@ -280,10 +282,6 @@ def train_diffusion(config: dict, device: str, autoencoder_path: str = None):
     )
     
     # Train
-    if 'diffusion' in config['training']:
-        epochs = config['training']['diffusion']['epochs']
-    else:
-        epochs = config['training'].get('epochs', 100)
     trainer.train(epochs=epochs)
     
     logger.info("Diffusion model training complete!")

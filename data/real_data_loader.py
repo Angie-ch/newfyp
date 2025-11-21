@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import requests
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Union
 import warnings
 from datetime import datetime, timedelta
 import torch
@@ -31,13 +31,21 @@ class IBTrACSLoader:
     IBTrACS: International Best Track Archive for Climate Stewardship
     """
     
-    def __init__(self, data_dir: str = "data/raw"):
+    def __init__(self, data_dir: str = "data/raw", dataset: str = "all"):
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         
-        # IBTrACS data URLs - use the last-three-years file which has recent data
-        self.ibtracs_url = "https://www.ncei.noaa.gov/data/international-best-track-archive-for-climate-stewardship-ibtracs/v04r00/access/csv/ibtracs.last3years.list.v04r00.csv"
-        self.cache_file = self.data_dir / "ibtracs_wp.csv"
+        dataset = dataset.lower()
+        dataset_urls = {
+            "all": "https://www.ncei.noaa.gov/data/international-best-track-archive-for-climate-stewardship-ibtracs/v04r00/access/csv/ibtracs.ALL.list.v04r00.csv",
+            "last3years": "https://www.ncei.noaa.gov/data/international-best-track-archive-for-climate-stewardship-ibtracs/v04r00/access/csv/ibtracs.last3years.list.v04r00.csv"
+        }
+        if dataset not in dataset_urls:
+            raise ValueError(f"Unsupported IBTrACS dataset '{dataset}'. Use 'all' or 'last3years'.")
+        
+        self.dataset = dataset
+        self.ibtracs_url = dataset_urls[dataset]
+        self.cache_file = self.data_dir / f"ibtracs_wp_{dataset}.csv"
         
     def download_ibtracs(self, force_download: bool = False):
         """Download IBTrACS data for Western Pacific"""
@@ -45,7 +53,7 @@ class IBTrACSLoader:
             print(f"[OK] Using cached IBTrACS data: {self.cache_file}")
             return
         
-        print("Downloading IBTrACS Western Pacific data...")
+        print(f"Downloading IBTrACS Western Pacific data ({self.dataset})...")
         print(f"URL: {self.ibtracs_url}")
         
         try:
@@ -550,7 +558,11 @@ class ERA5Loader:
     # Reverse mapping for lookup
     REVERSE_VAR_MAPPING = {v: k for k, v in VAR_NAME_MAPPING.items()}
     
-    def __init__(self, data_dir: str = "data/era5"):
+    def __init__(self, data_dir: Optional[Union[str, Path]] = None):
+        if data_dir is None:
+            base_dir = Path(__file__).resolve().parent
+            data_dir = base_dir / "data/era5"
+        
         self.data_dir = Path(data_dir)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         

@@ -11,7 +11,7 @@ model:
   # Autoencoder config
   era5_channels: 48
   latent_channels: 8
-  autoencoder_checkpoint: "checkpoints/joint_autoencoder/best.pth"
+  autoencoder_checkpoint: "checkpoint/joint_autoencoder/best.pth"
   
   # Diffusion model config
   hidden_dim: 256

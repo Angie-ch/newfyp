@@ -1,0 +1,41 @@
+{
+  "typhoon_001": {
+    "timestamp": "2023-08-15T12:00:00Z",
+    "description": "category 3 typhoon at latitude 20.5 longitude 130.2 with wind speed 45 m/s",
+    "metadata": {
+      "latitude": 20.5,
+      "longitude": 130.2,
+      "wind_speed": 45,
+      "pressure": 945,
+      "category": 3,
+      "movement_direction": "northwest",
+      "movement_speed": 15
+    }
+  },
+  "typhoon_002": {
+    "timestamp": "2023-08-15T18:00:00Z",
+    "description": "severe tropical storm moving northwest at 15 km/h",
+    "metadata": {
+      "latitude": 21.0,
+      "longitude": 129.5,
+      "wind_speed": 35,
+      "pressure": 970,
+      "category": 2,
+      "movement_direction": "northwest",
+      "movement_speed": 15
+    }
+  },
+  "typhoon_003": {
+    "timestamp": "2023-08-16T00:00:00Z",
+    "description": "super typhoon with well-defined eye structure",
+    "metadata": {
+      "latitude": 22.0,
+      "longitude": 128.0,
+      "wind_speed": 65,
+      "pressure": 920,
+      "category": 5,
+      "movement_direction": "north",
+      "movement_speed": 20
+    }
+  }
+}
